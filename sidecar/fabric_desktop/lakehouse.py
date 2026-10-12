@@ -53,6 +53,10 @@ class WriteResult:
 
 _attached: Attached | None = None
 
+# Set by the service when a metadata project is open: returns why a table may not be
+# written from a notebook (it is managed by the framework), or None.
+write_guard: Callable[[str, str, str], str | None] | None = None
+
 
 def attach(context: Attached | None) -> None:
     """Set the lakehouse that notebook code reads from and writes to."""
@@ -130,6 +134,9 @@ def write_table(data: Any, table: str, mode: str = "overwrite") -> WriteResult:
     started = time.monotonic()
     lh = _current()
     ref = table_ref(table)
+    reason = write_guard(lh.name, ref.schema, ref.table) if write_guard else None
+    if reason:
+        raise PermissionError(reason)
     arrow = _to_arrow(data)
     stage_locally(arrow, lh.work_dir / "staging" / lh.lakehouse_id / ref.schema / ref.table)
     delta = publish(arrow, ref, mode, lh.storage_token())

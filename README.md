@@ -80,6 +80,32 @@ lakehouse.write_table(by_region, "dbo.sales_by_region")  # Delta table written s
 
 Icons are [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT).
 
+## Metadata framework
+
+**Metadata** in the left rail manages Bronze to Gold (or any 2 to 10 layers) from config instead of one-off notebooks. A metadata project is a folder you keep in Git:
+
+| File or folder | What goes there |
+| --- | --- |
+| `layers.toml` | Your layers, in order. Each layer is its own schema-enabled lakehouse, `LH_<Layer>`, in every environment. |
+| `metadata/entities/<layer>.<table>.toml` | One file per table: source, contract (columns, types, keys), cleaning rules, derived columns, checks, load mode. |
+| `transforms/` | Your Python: hooks, custom checks and custom steps. Shared helpers go in `transforms/common.py`. |
+| `tests/` | Tests for your Python. Every hook and custom step must name one. |
+| `exceptions.toml` | Approved exceptions to a rule, each with a reason, an approver and an expiry. |
+| `environments.toml` | Where Dev, Test and Prod write. Dev writes Delta tables to the project's `.local` folder by default. |
+
+Every run goes through the same steps: read, contract (schema drift and types), clean, derive, hooks, lookups, checks, write, log. Load modes are full, incremental (watermark plus merge on the key), Type 1 dimension and Type 2 dimension. Dimensions get integer surrogate keys that are never renumbered and an Unknown member at -1; facts look up the key that was current on the fact's date.
+
+Four gates keep the rules followed:
+
+1. **Save:** every entity is checked against its layer's standards. Tables can read earlier layers, or their own layer when there's no loop, never a later one. Columns must exist upstream, so renames and deletes show what breaks. Custom code needs an owner and a test.
+2. **Write:** checks run before every commit. `stop` writes nothing, `quarantine` moves failing rows to `quarantine.<schema>_<table>` with the reason, `warn` only records it. Only the framework writes a managed table; notebooks get an error and can use `scratch_` tables.
+3. **Promote:** Dev to Test and Test to Prod need a clean save gate and a green last run of every table's current logic. Promote creates the `LH_<Layer>` lakehouses and `LH_Meta`, and pins the environment to that metadata version.
+4. **After:** `meta.run_log`, `meta.dq_results`, `meta.watermarks`, `meta.schema_history` and `meta.deployments` in `LH_Meta`, plus `_run_id` and `_loaded_at` on every row and the run ID and metadata version on every Delta commit.
+
+When a table's logic changes, an incremental run stops and asks: apply to new rows only, or rebuild the table and everything downstream. Changing a dimension from Type 1 to Type 2 offers a migration that keeps every key.
+
+Where custom logic goes, simplest first: an expression (`[[derive]]` or a `[[check]]` with `expr`), a hook (`[hooks] after_clean` or `before_write`, a `(df, ctx)` function that declares the tables it `reads` and the columns it `adds`), a custom check (`[[check]] python = ...`), or a custom step (`[step] custom = ...`) that replaces one table's transform while the framework still checks and writes the result.
+
 ## Job files
 
 ```toml
@@ -99,4 +125,4 @@ Relative paths in a job resolve from the job file's folder.
 
 ## Not yet built
 
-Merge (upsert) writes, a bundled Python runtime and installer, scheduling, pipelines, and running published notebooks in Fabric (they use the local `fabric_desktop.lakehouse` API).
+A bundled Python runtime and installer, scheduling, pipelines, and running published notebooks or metadata runs on Fabric compute (Test and Prod runs execute on this PC and write to OneLake). From the metadata plan: profiling with suggested cleaning rules, per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote.
