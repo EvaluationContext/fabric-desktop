@@ -22,8 +22,8 @@ dev = ["pytest>=8"]
 [project.scripts]
 fabric-desktop = "fabric_desktop.cli:main"
 
-[tool.setuptools]
-packages = ["fabric_desktop"]
+[tool.setuptools.packages.find]
+include = ["fabric_desktop*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

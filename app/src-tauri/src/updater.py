@@ -2,7 +2,7 @@
 
 Uses only the standard library, because it must work before the sidecar is installed.
 
-    check            print one JSON object describing Python, the sidecar and the latest release
+    check            print one JSON object describing Python, the sidecar (and whether it starts) and the latest release
     install-sidecar  pip install the sidecar from the given commit, streaming pip's output
     download-app     download the latest release exe to a path, printing "progress <percent>" lines
 """
@@ -42,6 +42,16 @@ def installed_sidecar() -> dict:
     return {"version": dist.version, "commit": commit, "editable": editable}
 
 
+def load_error() -> str | None:
+    """Start the sidecar's modules in a fresh Python, the way the app will. None when they load."""
+    proc = subprocess.run([sys.executable, "-c", "import fabric_desktop.server"], stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if proc.returncode == 0:
+        return None
+    lines = [line for line in proc.stderr.splitlines() if line.strip()]
+    return lines[-1] if lines else f"exited with code {proc.returncode}"
+
+
 def latest_release() -> dict:
     """Commit of the newest published exe, from version.json in the "latest" release."""
     try:
@@ -52,10 +62,13 @@ def latest_release() -> dict:
 
 
 def check() -> dict:
+    sidecar = installed_sidecar()
+    if sidecar["version"]:
+        sidecar["error"] = load_error()
     return {
         "python": ".".join(map(str, sys.version_info[:3])),
         "python_ok": sys.version_info >= MIN_PYTHON,
-        "sidecar": installed_sidecar(),
+        "sidecar": sidecar,
         "latest": latest_release(),
     }
 
@@ -70,6 +83,10 @@ def install_sidecar(commit: str) -> int:
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if code:
             return code
+    error = load_error()
+    if error:
+        print(f"The local engine installed but does not start: {error}", flush=True)
+        return 1
     return 0
 
 

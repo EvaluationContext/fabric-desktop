@@ -1145,14 +1145,16 @@ async function checkComponents() {
   }
 
   if (!report.python_ok) set("sidecar", "skip", "Needs Python 3.11 or later");
-  else if (sidecar.editable) set("sidecar", "ok", `${sidecar.version}, developer install (not managed)`);
-  else if (!app.commit) {
-    if (sidecar.version) set("sidecar", "ok", `${sidecar.version} (not checked in a local build)`);
+  else if (sidecar.editable || !app.commit) {
+    const kind = sidecar.editable ? "developer install (not managed)" : "not checked in a local build";
+    if (sidecar.version && sidecar.error) set("sidecar", "error", `${sidecar.version} does not start: ${sidecar.error}`);
+    else if (sidecar.version) set("sidecar", "ok", `${sidecar.version}, ${kind}`);
     else set("sidecar", "error", "Not installed. In the sidecar folder, run: python -m pip install -e .");
-  } else if (sidecar.commit === app.commit) {
+  } else if (sidecar.commit === app.commit && !sidecar.error) {
     set("sidecar", "ok", `${sidecar.version}, matches this build`);
   } else {
-    set("sidecar", "busy", sidecar.version ? `Updating to build ${short(app.commit)}…` : `Installing build ${short(app.commit)}…`);
+    set("sidecar", "busy", sidecar.commit === app.commit ? `Repairing (it would not start: ${sidecar.error})…`
+      : sidecar.version ? `Updating to build ${short(app.commit)}…` : `Installing build ${short(app.commit)}…`);
     log.hidden = false;
     const unlisten = await listen((line) => {
       log.textContent += `${line}\n`;
