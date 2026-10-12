@@ -31,6 +31,9 @@ jobs:
         with:
           workspaces: app/src-tauri
       - run: cargo build --release --locked
+        env:
+          # Builds of main carry their commit, so the app can tell when a newer release exists.
+          FABRIC_RELEASE_COMMIT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: fabric-desktop-windows
@@ -52,8 +55,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          echo "{\"commit\": \"$GITHUB_SHA\"}" > version.json
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest fabric-desktop.exe \
+          gh release create latest fabric-desktop.exe version.json \
             --title "Fabric Desktop (latest build)" \
             --notes "Built automatically from ${GITHUB_SHA::7} on main. Download fabric-desktop.exe and double-click it." \
             --target "$GITHUB_SHA"

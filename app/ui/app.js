@@ -1069,11 +1069,113 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("beforeunload", () => { if (state.notebook?.dirty) saveNotebook(); });
 
+// ---------- startup component check ----------
+
+// Before the sidecar starts, make sure this exe, Python and the sidecar are
+// current and match each other, updating whatever is behind.
+async function checkComponents() {
+  const short = (commit) => commit.slice(0, 7);
+  const rows = {};
+  const row = (key, label) => (rows[key] = h("div", { class: "startup-row", "data-status": "busy" },
+    h("span", { class: "startup-mark" }), h("span", { class: "startup-name" }, label),
+    h("span", { class: "startup-detail" }, "Checking…")));
+  const set = (key, status, detail) => {
+    rows[key].dataset.status = status;
+    rows[key].lastChild.textContent = detail;
+  };
+  const log = h("pre", { class: "startup-log", hidden: true });
+  const actions = h("div", { class: "dialog-actions" });
+  const choose = (...labels) => new Promise((resolve) => actions.replaceChildren(...labels.map((label, i) =>
+    btn(label, null, () => { actions.replaceChildren(); resolve(i); }, i === 0 ? "tool primary" : "tool outline"))));
+  const listen = (fn) => window.__TAURI__.event.listen("component-log", (e) => fn(e.payload));
+
+  document.getElementById("dialog-root").replaceChildren(h("div", { class: "overlay" },
+    h("div", { class: "dialog", role: "dialog", "aria-label": "Checking components" },
+      h("div", { class: "dialog-head" }, "Checking components"),
+      h("div", { class: "startup-rows" }, row("app", "Fabric Desktop"), row("python", "Python"), row("sidecar", "Local engine")),
+      log, actions)));
+
+  let report;
+  try {
+    report = await invoke("check_components");
+  } catch (err) {
+    set("app", "skip", "Needs Python");
+    set("python", "error", `${err} Install Python 3.11 or later from python.org, or set FABRIC_DESKTOP_PYTHON to its full path.`);
+    set("sidecar", "skip", "Needs Python");
+    if (await choose("Retry", "Continue anyway") === 0) return checkComponents();
+    return closeDialog();
+  }
+  const { app, sidecar, latest } = report;
+
+  set("python", report.python_ok ? "ok" : "error",
+    report.python_ok ? report.python : `${report.python} is too old. Fabric Desktop needs Python 3.11 or later.`);
+
+  if (!app.commit) set("app", "ok", `${app.version}, local build (update check off)`);
+  else if (!latest.commit) set("app", "warn", `Build ${short(app.commit)}. Could not check for a newer build.`);
+  else if (latest.commit === app.commit) set("app", "ok", `Up to date (build ${short(app.commit)})`);
+  else {
+    set("app", "update", `Build ${short(latest.commit)} is available. You have ${short(app.commit)}.`);
+    if (await choose("Update now", "Later") === 0) {
+      set("app", "busy", "Downloading…");
+      const unlisten = await listen((line) => {
+        const m = /^progress (\d+)/.exec(line);
+        if (m) set("app", "busy", `Downloading… ${m[1]}%`);
+      });
+      try {
+        await invoke("update_app");
+        set("app", "ok", "Restarting…");
+        return new Promise(() => {});  // the new exe takes over
+      } catch (err) {
+        set("app", "warn", `Update failed: ${err}`);
+      } finally {
+        unlisten();
+      }
+    } else {
+      set("app", "warn", `Update skipped. Still on build ${short(app.commit)}.`);
+    }
+  }
+
+  if (!report.python_ok) set("sidecar", "skip", "Needs Python 3.11 or later");
+  else if (sidecar.editable) set("sidecar", "ok", `${sidecar.version}, developer install (not managed)`);
+  else if (!app.commit) {
+    if (sidecar.version) set("sidecar", "ok", `${sidecar.version} (not checked in a local build)`);
+    else set("sidecar", "error", "Not installed. In the sidecar folder, run: python -m pip install -e .");
+  } else if (sidecar.commit === app.commit) {
+    set("sidecar", "ok", `${sidecar.version}, matches this build`);
+  } else {
+    set("sidecar", "busy", sidecar.version ? `Updating to build ${short(app.commit)}…` : `Installing build ${short(app.commit)}…`);
+    log.hidden = false;
+    const unlisten = await listen((line) => {
+      log.textContent += `${line}\n`;
+      log.scrollTop = log.scrollHeight;
+    });
+    try {
+      await invoke("update_sidecar");
+      set("sidecar", "ok", `Updated to build ${short(app.commit)}`);
+      log.hidden = true;
+    } catch (err) {
+      set("sidecar", "error", "Update failed. The pip output is below.");
+      log.textContent += `${err}\n`;
+    } finally {
+      unlisten();
+    }
+  }
+
+  if (Object.values(rows).some((r) => r.dataset.status === "error")) {
+    if (await choose("Retry", "Continue anyway") === 0) return checkComponents();
+  }
+  closeDialog();
+}
+
 hydrateIcons();
-render();
-attempt(async () => {
-  const env = await rpc("environment");
-  state.python = env.python;
-  state.user = env.user;
+renderChrome();
+// Nothing may start the sidecar until the check is done: pip cannot replace files it has open.
+checkComponents().finally(() => {
   render();
-}, "Could not start the Python sidecar");
+  attempt(async () => {
+    const env = await rpc("environment");
+    state.python = env.python;
+    state.user = env.user;
+    render();
+  }, "Could not start the Python sidecar");
+});
