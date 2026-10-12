@@ -14,7 +14,7 @@ The architecture and MVP plan are in the [project plan doc](https://claude.ai/co
 | Path | What it is |
 | --- | --- |
 | `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake addressing, job runner, publisher, JSON-lines server |
-| `app/` | Tauri 2 shell (`src-tauri/`) and plain HTML UI (`ui/`). It starts the sidecar and forwards UI actions to it |
+| `app/` | Tauri 2 shell (`src-tauri/`) and the Fabric-style UI (`ui/`, plain HTML and JavaScript). The shell starts the sidecar and forwards UI actions to it |
 | `examples/` | Sample jobs (`sales_by_region.toml` for DuckDB, `top_products.toml` for Polars) and sample data |
 
 ## One-time setup: Entra app registration
@@ -51,6 +51,27 @@ cd app\src-tauri
 cargo run
 ```
 
+## Notebooks
+
+The app looks and works like the Fabric service: the same left rail (Home, Create, Workspaces, OneLake, Monitor), and Python notebooks with a ribbon, an Explorer pane and **Add data items** to attach a lakehouse. Cells run in a Python kernel on this PC, so no Fabric capacity is used.
+
+```python
+import polars as pl
+from fabric_desktop import lakehouse
+
+sales = lakehouse.read_csv("Files/raw/sales.csv")      # downloaded from the attached lakehouse
+by_region = sales.group_by("region").agg(pl.col("amount").sum())
+lakehouse.write_table(by_region, "dbo.sales_by_region")  # Delta table written straight to OneLake
+```
+
+- `read_csv`, `read_parquet` and `read_json` read `Files/...` paths from the attached lakehouse; any other path is a file on this PC.
+- `read_table("schema.table")` and `write_table(df, "schema.table", mode="overwrite" | "append")` work with Delta tables. The schema defaults to `dbo`. Writes are checked against the Fabric-safe Delta profile and show up in **Monitor**.
+- A cell's last expression is shown below it. Data frames (Polars, pandas, Arrow, DuckDB) show as a table of the first 100 rows.
+- **Stop** ends the running cell by restarting the kernel, which clears its variables.
+- Notebooks autosave as `.ipynb` files in `%LOCALAPPDATA%\FabricDesktop\notebooks`. **Publish to OneLake** also saves the notebook as a notebook item in the attached lakehouse's workspace.
+
+Icons are [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT).
+
 ## Job files
 
 ```toml
@@ -70,4 +91,4 @@ Relative paths in a job resolve from the job file's folder.
 
 ## Not yet built
 
-Merge (upsert) writes, reading inputs from OneLake, a bundled Python runtime and installer, scheduling, and notebook or pipeline items.
+Merge (upsert) writes, a bundled Python runtime and installer, scheduling, pipelines, and running published notebooks in Fabric (they use the local `fabric_desktop.lakehouse` API).

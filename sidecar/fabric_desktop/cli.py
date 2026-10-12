@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from .server import serve
+from .server import main as serve
 from .service import Service
 
 
@@ -20,10 +20,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("history", help="show recent runs")
     args = parser.parse_args(argv)
 
-    service = Service()
     if args.command == "serve":
-        serve(service)
+        serve()
         return
+    service = Service()
     result = {
         "sign-in": lambda: service.sign_in(),
         "preview": lambda: service.preview_job(args.job, limit=10),

@@ -6,41 +6,43 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header>
-    <h1>Fabric Desktop</h1>
-    <span id="user">Not signed in</span>
-    <button id="sign-in">Sign in</button>
+  <header class="topbar">
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="5" fill="#0f6b5c"/><path d="M7 16 12 7l5 9" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
+      <span>Fabric Desktop</span>
+    </div>
+    <nav id="breadcrumb" class="breadcrumb" aria-label="Breadcrumb"></nav>
+    <div class="search-wrap">
+      <label class="search">
+        <span data-icon="search" data-size="16"></span>
+        <span class="sr-only">Search</span>
+        <input id="search" type="search" placeholder="Search notebooks, workspaces and lakehouses">
+      </label>
+    </div>
+    <div class="topbar-right">
+      <span class="pill"><span data-icon="desktop" data-size="14"></span>Local compute</span>
+      <button id="account" class="avatar" title="Sign in">?</button>
+    </div>
   </header>
 
-  <main>
-    <section>
-      <h2>Destination</h2>
-      <label>Workspace <select id="workspace"></select></label>
-      <ul id="lakehouses"></ul>
-      <div class="row">
-        <input id="new-lakehouse" placeholder="New lakehouse name">
-        <button id="create-lakehouse">Create lakehouse</button>
-      </div>
-      <div id="tables"></div>
-    </section>
+  <div class="body">
+    <nav id="rail" class="rail" aria-label="Main">
+      <button class="rail-item" data-view="home"><span data-icon="home" data-size="22"></span>Home</button>
+      <button class="rail-item" data-view="create"><span data-icon="create" data-size="22"></span>Create</button>
+      <button class="rail-item" data-view="workspaces"><span data-icon="workspaces" data-size="22"></span>Workspaces</button>
+      <button class="rail-item" data-view="onelake"><span data-icon="onelake" data-size="22"></span>OneLake</button>
+      <button class="rail-item" data-view="monitor"><span data-icon="monitor" data-size="22"></span>Monitor</button>
+      <div class="rail-divider"></div>
+      <div id="rail-open"></div>
+    </nav>
 
-    <section>
-      <h2>Job</h2>
-      <div class="row">
-        <input id="job-path" placeholder="C:\path\to\job.toml">
-        <button id="preview">Preview locally</button>
-        <button id="run" class="primary">Run and publish</button>
-      </div>
-      <div id="result"></div>
-    </section>
+    <main id="view" class="view"></main>
+  </div>
 
-    <section>
-      <h2>Run history</h2>
-      <table id="history"><thead><tr><th>Finished</th><th>Job</th><th>Rows</th><th>Delta version</th><th>Seconds</th></tr></thead><tbody></tbody></table>
-    </section>
-  </main>
+  <div id="dialog-root"></div>
+  <div id="toast" class="toast" role="status" hidden></div>
 
-  <p id="status" role="status"></p>
+  <script src="icons.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

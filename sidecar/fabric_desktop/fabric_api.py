@@ -1,7 +1,8 @@
-"""Thin client for the Fabric REST API (workspaces and lakehouses)."""
+"""Thin client for the Fabric REST API (workspaces, lakehouses and notebooks)."""
 
 from __future__ import annotations
 
+import base64
 import time
 from typing import Any, Callable
 
@@ -76,3 +77,21 @@ class FabricClient:
 
     def find_lakehouse(self, workspace_id: str, name: str) -> dict[str, Any] | None:
         return next((lh for lh in self.list_lakehouses(workspace_id) if lh["displayName"] == name), None)
+
+    def list_notebooks(self, workspace_id: str) -> list[dict[str, Any]]:
+        return self._paged(f"/workspaces/{workspace_id}/notebooks")
+
+    def save_notebook(self, workspace_id: str, name: str, ipynb: bytes) -> dict[str, Any]:
+        """Create the notebook item, or replace its definition if one with this name exists."""
+        definition = {"format": "ipynb", "parts": [{
+            "path": "notebook-content.ipynb",
+            "payload": base64.b64encode(ipynb).decode(),
+            "payloadType": "InlineBase64",
+        }]}
+        existing = next((n for n in self.list_notebooks(workspace_id) if n["displayName"] == name), None)
+        if existing is None:
+            body = {"displayName": name, "definition": definition}
+            return self._wait(self._request("POST", f"/workspaces/{workspace_id}/notebooks", json=body))
+        url = f"/workspaces/{workspace_id}/notebooks/{existing['id']}/updateDefinition"
+        self._wait(self._request("POST", url, json={"definition": definition}))
+        return existing

@@ -12,6 +12,10 @@ class Resp:
     def json(self):
         return self._body
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
 
 class FakeSession:
     def __init__(self, responses):

@@ -4,14 +4,15 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 const SIDECAR_EXITED: &str = "The Python sidecar stopped. It will restart on the next action.";
 
 struct Sidecar {
-    _child: Child,
+    // Shared with SidecarState so Stop can kill the process while a call is blocked on it.
+    child: Arc<Mutex<Child>>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -35,7 +36,7 @@ impl Sidecar {
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().expect("sidecar stdin");
         let stdout = BufReader::new(child.stdout.take().expect("sidecar stdout"));
-        Ok(Self { _child: child, stdin, stdout, next_id: 1 })
+        Ok(Self { child: Arc::new(Mutex::new(child)), stdin, stdout, next_id: 1 })
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
@@ -58,7 +59,10 @@ impl Sidecar {
     }
 }
 
-struct SidecarState(Mutex<Option<Sidecar>>);
+struct SidecarState {
+    sidecar: Mutex<Option<Sidecar>>,
+    child: Mutex<Option<Arc<Mutex<Child>>>>,
+}
 
 #[tauri::command]
 async fn rpc(
@@ -66,9 +70,10 @@ async fn rpc(
     method: String,
     params: Option<Value>,
 ) -> Result<Value, String> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.sidecar.lock().map_err(|e| e.to_string())?;
     if guard.is_none() {
         let sidecar = Sidecar::start().map_err(|e| format!("Could not start the Python sidecar: {e}"))?;
+        *state.child.lock().map_err(|e| e.to_string())? = Some(sidecar.child.clone());
         *guard = Some(sidecar);
     }
     let result = guard
@@ -81,10 +86,20 @@ async fn rpc(
     result
 }
 
+/// Stops a running notebook cell by ending the sidecar process. The blocked
+/// `rpc` call then returns an error and the next call starts a fresh sidecar.
+#[tauri::command]
+fn stop_kernel(state: tauri::State<'_, SidecarState>) -> Result<(), String> {
+    if let Some(child) = state.child.lock().map_err(|e| e.to_string())?.take() {
+        let _ = child.lock().map_err(|e| e.to_string())?.kill();
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
-        .manage(SidecarState(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![rpc])
+        .manage(SidecarState { sidecar: Mutex::new(None), child: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![rpc, stop_kernel])
         .run(tauri::generate_context!())
         .expect("error while running Fabric Desktop");
 }
