@@ -12,7 +12,20 @@ API = "https://api.fabric.microsoft.com/v1"
 
 
 class FabricError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+def _error(method: str, url: str, resp: requests.Response) -> FabricError:
+    try:
+        code = resp.json().get("errorCode")
+    except ValueError:
+        code = None
+    if code == "CapacityNotActive":
+        return FabricError("This workspace's Fabric capacity is paused or inactive. Resume the capacity, "
+                           "or use a workspace on an active capacity.", code)
+    return FabricError(f"{method} {url} failed with {resp.status_code}: {resp.text}", code)
 
 
 class FabricClient:
@@ -33,7 +46,7 @@ class FabricClient:
                 break
             self._sleep(float(resp.headers.get("Retry-After", 5)))
         if resp.status_code >= 400:
-            raise FabricError(f"{method} {url} failed with {resp.status_code}: {resp.text}")
+            raise _error(method, url, resp)
         return resp
 
     def _paged(self, url: str, key: str = "value") -> list[dict[str, Any]]:
