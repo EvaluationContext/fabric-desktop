@@ -1,3 +1,3 @@
 """Fabric Desktop sidecar: local compute, OneLake storage."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
