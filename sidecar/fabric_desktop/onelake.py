@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import requests
@@ -65,3 +66,44 @@ class TableCatalog:
         url = f"{TABLE_API}/{workspace_id}/{lakehouse_id}/api/2.1/unity-catalog/tables"
         body = self._get(url, catalog_name=lakehouse_id, schema_name=schema)
         return [t["name"] for t in body.get("tables", [])]
+
+
+class FileStore:
+    """The lakehouse Files area, through the OneLake DFS (ADLS Gen2) API."""
+
+    def __init__(self, token_provider: Callable[[], str], session: requests.Session | None = None):
+        self._token = token_provider
+        self._http = session or requests.Session()
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token()}", "x-ms-version": "2023-11-03"}
+
+    def list(self, workspace_id: str, lakehouse_id: str, directory: str = "Files") -> list[dict[str, Any]]:
+        """Immediate children of ``directory`` as ``{"name", "path", "is_dir", "size"}``."""
+        url = f"https://{DFS_HOST}/{workspace_id}"
+        params = {"resource": "filesystem", "recursive": "false",
+                  "directory": f"{lakehouse_id}/{directory.strip('/')}"}
+        entries: list[dict[str, Any]] = []
+        while True:
+            resp = self._http.get(url, params=params, headers=self._headers(), timeout=60)
+            resp.raise_for_status()
+            for p in resp.json().get("paths", []):
+                path = p["name"].split("/", 1)[1]  # drop the lakehouse GUID
+                entries.append({"name": path.rsplit("/", 1)[-1], "path": path,
+                                "is_dir": str(p.get("isDirectory", "")).lower() == "true",
+                                "size": int(p.get("contentLength") or 0)})
+            token = resp.headers.get("x-ms-continuation")
+            if not token:
+                break
+            params["continuation"] = token
+        return sorted(entries, key=lambda e: (not e["is_dir"], e["name"].lower()))
+
+    def download(self, workspace_id: str, lakehouse_id: str, path: str, dest: Path) -> Path:
+        url = f"https://{DFS_HOST}/{workspace_id}/{lakehouse_id}/{path.strip('/')}"
+        with self._http.get(url, headers=self._headers(), stream=True, timeout=300) as resp:
+            resp.raise_for_status()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with dest.open("wb") as f:
+                for chunk in resp.iter_content(1 << 20):
+                    f.write(chunk)
+        return dest

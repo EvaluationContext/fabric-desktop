@@ -9,7 +9,7 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "Fabric Desktop", "width": 1100, "height": 760 }
+      { "label": "main", "title": "Fabric Desktop", "width": 1440, "height": 900, "minWidth": 960, "minHeight": 600 }
     ],
     "security": { "csp": null }
   },

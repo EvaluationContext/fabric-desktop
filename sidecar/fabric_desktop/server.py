@@ -7,13 +7,16 @@ Response: {"id": 1, "result": [...]}  or  {"id": 1, "error": "message"}
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import IO
 
 from .service import Service
 
-METHODS = {"sign_in", "list_workspaces", "list_lakehouses", "create_lakehouse",
-           "list_tables", "preview_job", "run_job", "history"}
+METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "create_lakehouse",
+           "list_tables", "list_files", "preview_job", "run_job", "history",
+           "run_cell", "restart_kernel", "list_notebooks", "new_notebook", "open_notebook",
+           "save_notebook", "rename_notebook", "delete_notebook", "publish_notebook"}
 
 
 def handle(service: Service, line: str) -> dict:
@@ -38,5 +41,15 @@ def serve(service: Service | None = None, stdin: IO[str] = sys.stdin, stdout: IO
             stdout.flush()
 
 
+def main() -> None:
+    # Keep a private handle on stdout for responses, and send fd 1 to stderr so
+    # anything a notebook cell or a native library prints cannot corrupt the protocol.
+    rpc_out = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", newline="\n")
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    sys.stdout = sys.stderr
+    sys.stdin.reconfigure(encoding="utf-8")  # the shell sends UTF-8 whatever the Windows code page
+    serve(stdin=sys.stdin, stdout=rpc_out)
+
+
 if __name__ == "__main__":
-    serve()
+    main()
