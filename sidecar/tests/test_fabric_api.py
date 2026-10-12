@@ -55,3 +55,14 @@ def test_list_follows_continuation_and_retries_429():
     ])
     assert [w["id"] for w in c.list_workspaces()] == ["a", "b"]
     assert len(s.calls) == 3
+
+
+def test_capacity_not_active_gets_a_plain_message():
+    c, _ = client([Resp(404, {"errorCode": "CapacityNotActive", "message": "Capacity X is not active"})])
+    try:
+        c.list_lakehouses("ws1")
+    except Exception as exc:
+        assert exc.code == "CapacityNotActive"
+        assert "capacity is paused" in str(exc)
+    else:
+        raise AssertionError("expected FabricError")

@@ -324,10 +324,19 @@ async function renderOneLake() {
     h("p", { class: "sub" }, "Lakehouses across all your workspaces."), signInCallout(), body));
   if (!state.user) return;
   const rows = [];
+  const skipped = [];
   for (const ws of await loadWorkspaces()) {
-    const lakehouses = (await attempt(() => rpc("list_lakehouses", { workspace_id: ws.id }))) || [];
-    lakehouses.forEach((lh) => rows.push(lakehouseRef(ws, lh)));
+    try {
+      const lakehouses = await rpc("list_lakehouses", { workspace_id: ws.id });
+      lakehouses.forEach((lh) => rows.push(lakehouseRef(ws, lh)));
+    } catch (err) {
+      // A workspace on a paused capacity can't list items; show the rest.
+      skipped.push(String(err).includes("capacity is paused") ? `${ws.displayName} (capacity paused)` : ws.displayName);
+    }
     if (state.view !== "onelake") return;
+  }
+  if (skipped.length) {
+    body.before(h("p", { class: "muted-text" }, `Skipped ${skipped.length} workspace${skipped.length === 1 ? "" : "s"}: ${skipped.join(", ")}.`));
   }
   const shown = rows.filter((r) => matches(`${r.name} ${r.workspace_name}`));
   body.replaceWith(shown.length ? h("table", { class: "list" },
