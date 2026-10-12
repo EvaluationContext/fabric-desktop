@@ -250,6 +250,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .toast {
   position: fixed; left: 50%; bottom: 40px; z-index: 30; transform: translateX(-50%); max-width: min(640px, 90vw);
   padding: 10px 16px; border-radius: 6px; background: #323130; color: #fff; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+  white-space: pre-line; overflow-wrap: anywhere; user-select: text;
 }
 .toast.error { background: var(--danger); }
 
