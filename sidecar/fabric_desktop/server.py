@@ -46,7 +46,17 @@ def serve(service: Service | None = None, stdin: IO[str] = sys.stdin, stdout: IO
             stdout.flush()
 
 
+def _log_file() -> IO[str]:
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".cache")
+    os.makedirs(os.path.join(base, "FabricDesktop"), exist_ok=True)
+    return open(os.path.join(base, "FabricDesktop", "sidecar.log"), "a", encoding="utf-8", buffering=1)
+
+
 def main() -> None:
+    # Started from a windowed app, Python can have no stderr at all (sys.stderr is
+    # None). Log to a file then, rather than failing on the first write.
+    if sys.stderr is None:
+        sys.stderr = _log_file()
     # Keep a private handle on stdout for responses, and send fd 1 to stderr so
     # anything a notebook cell or a native library prints cannot corrupt the protocol.
     rpc_out = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", newline="\n")

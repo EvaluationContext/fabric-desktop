@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pyarrow as pa
@@ -68,3 +71,14 @@ def test_server_reports_errors_without_crashing():
     assert handle(Fake(), json.dumps({"id": 1, "method": "history"})) == {"id": 1, "result": [{"job": "x"}]}
     assert "boom" in handle(Fake(), json.dumps({"id": 2, "method": "list_workspaces"}))["error"]
     assert "unknown" in handle(Fake(), json.dumps({"id": 3, "method": "rm_rf"}))["error"]
+
+
+
+@pytest.mark.skipif(os.name == "nt", reason="closes fd 2 in the child, which needs POSIX")
+def test_server_starts_without_stderr(tmp_path):
+    """The windowed exe can start Python with no stderr; the server must still answer."""
+    out = subprocess.run([sys.executable, "-m", "fabric_desktop.server"], input='{"id": 1, "method": "environment"}\n',
+                         stdout=subprocess.PIPE, text=True, timeout=60, env=os.environ | {"LOCALAPPDATA": str(tmp_path)},
+                         preexec_fn=lambda: os.close(2))
+    assert out.returncode == 0
+    assert json.loads(out.stdout)["id"] == 1

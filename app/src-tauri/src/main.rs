@@ -35,15 +35,20 @@ fn hide_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
-fn updater(args: &[&str]) -> Command {
-    // Run from the app's own data folder so no stray .py file in the current
-    // folder can shadow a standard library module.
+/// The app's own data folder, where the sidecar's log and the updater's working folder live.
+fn data_dir() -> PathBuf {
     let dir = std::env::var_os("LOCALAPPDATA")
         .map(|d| PathBuf::from(d).join("FabricDesktop"))
         .unwrap_or_else(std::env::temp_dir);
     let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn updater(args: &[&str]) -> Command {
+    // Run from the app's own data folder so no stray .py file in the current
+    // folder can shadow a standard library module.
     let mut cmd = Command::new(python());
-    cmd.args(["-u", "-c", UPDATER]).args(args).current_dir(dir).stdin(Stdio::null());
+    cmd.args(["-u", "-c", UPDATER]).args(args).current_dir(data_dir()).stdin(Stdio::null());
     hide_window(&mut cmd);
     cmd
 }
@@ -82,33 +87,53 @@ struct Sidecar {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    log: PathBuf,
 }
 
 impl Sidecar {
     fn start() -> std::io::Result<Self> {
+        // A windowed exe has no stderr to hand down, and Python started without one
+        // exits at once. Send it to a log file instead, so crashes can be explained.
+        let log = data_dir().join("sidecar.log");
+        let stderr = std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
         let mut cmd = Command::new(python());
         cmd.args(["-m", "fabric_desktop.server"])
+            .current_dir(data_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(stderr);
         hide_window(&mut cmd);
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take().expect("sidecar stdin");
         let stdout = BufReader::new(child.stdout.take().expect("sidecar stdout"));
-        Ok(Self { child: Arc::new(Mutex::new(child)), stdin, stdout, next_id: 1 })
+        Ok(Self { child: Arc::new(Mutex::new(child)), stdin, stdout, next_id: 1, log })
+    }
+
+    /// The exit message plus the last thing the sidecar wrote to its log, which is
+    /// usually the Python error that stopped it.
+    fn exited(&self) -> String {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let tail = tail[tail.len().saturating_sub(3)..].join("\n");
+        if tail.is_empty() {
+            SIDECAR_EXITED.to_string()
+        } else {
+            format!("{SIDECAR_EXITED}\n{tail}\nFull log: {}", self.log.display())
+        }
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
         let request = json!({ "id": id, "method": method, "params": params });
-        writeln!(self.stdin, "{request}").map_err(|_| SIDECAR_EXITED.to_string())?;
-        self.stdin.flush().map_err(|_| SIDECAR_EXITED.to_string())?;
+        if writeln!(self.stdin, "{request}").and_then(|_| self.stdin.flush()).is_err() {
+            return Err(self.exited());
+        }
 
         let mut line = String::new();
         let read = self.stdout.read_line(&mut line).map_err(|e| e.to_string())?;
         if read == 0 {
-            return Err(SIDECAR_EXITED.to_string());
+            return Err(self.exited());
         }
         let response: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
         if let Some(error) = response.get("error") {
@@ -139,7 +164,7 @@ async fn rpc(
         .as_mut()
         .expect("sidecar started")
         .call(&method, params.unwrap_or_else(|| json!({})));
-    if matches!(&result, Err(e) if e == SIDECAR_EXITED) {
+    if matches!(&result, Err(e) if e.starts_with(SIDECAR_EXITED)) {
         *guard = None;
     }
     result
