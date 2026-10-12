@@ -12,6 +12,7 @@ from .auth import Authenticator
 from .fabric_api import FabricClient
 from . import lakehouse
 from .jobs import Job, run_local
+from .meta_service import MetaMixin
 from .notebook import Kernel, NotebookStore, to_ipynb
 from .onelake import FileStore, TableCatalog
 from .publish import run_job
@@ -22,7 +23,7 @@ def data_dir() -> Path:
     return Path(base) / "FabricDesktop"
 
 
-class Service:
+class Service(MetaMixin):
     def __init__(self, client_id: str | None = None, root: Path | None = None):
         self._client_id = client_id or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", "")
         self.root = root or data_dir()

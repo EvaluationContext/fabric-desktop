@@ -35,7 +35,7 @@ function h(tag, attrs = {}, ...children) {
     else if (k === "style") node.style.cssText = v;
     else node.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) {
+  for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
     node.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
@@ -169,7 +169,7 @@ function renderChrome() {
   account.title = state.user ? `Signed in as ${state.user}` : "Sign in";
 
   document.querySelectorAll("#rail .rail-item[data-view]").forEach((el) => {
-    el.classList.toggle("active", el.dataset.view === state.view);
+    el.classList.toggle("active", el.dataset.view === (state.view === "entity" ? "metadata" : state.view));
   });
   const open = [];
   if (state.openWorkspace) {
@@ -206,7 +206,7 @@ function renderChrome() {
 function render() {
   renderChrome();
   const views = { home: renderHome, create: renderCreate, workspaces: renderWorkspaces, workspace: renderWorkspace,
-    onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, notebook: renderNotebook };
+    onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, notebook: renderNotebook, ...window.META_VIEWS };
   (views[state.view] || renderHome)();
 }
 

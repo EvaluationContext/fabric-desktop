@@ -16,7 +16,10 @@ from .service import Service
 METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "create_lakehouse",
            "list_tables", "list_files", "preview_job", "run_job", "history",
            "run_cell", "restart_kernel", "list_notebooks", "new_notebook", "open_notebook",
-           "save_notebook", "rename_notebook", "delete_notebook", "publish_notebook"}
+           "save_notebook", "rename_notebook", "delete_notebook", "publish_notebook",
+           "meta_project", "meta_init", "meta_open", "meta_set_environment", "meta_entity", "meta_save_entity",
+           "meta_new_entity", "meta_delete_entity", "meta_set_layers", "meta_run", "meta_runs", "meta_run_detail",
+           "meta_preview", "meta_promote_check", "meta_promote"}
 
 
 def handle(service: Service, line: str) -> dict:
@@ -30,6 +33,8 @@ def handle(service: Service, line: str) -> dict:
     try:
         return {"id": req_id, "result": getattr(service, method)(**req.get("params", {}))}
     except Exception as exc:  # report every failure to the UI rather than dying
+        if hasattr(exc, "errors"):  # a gate: its message already lists every reason
+            return {"id": req_id, "error": str(exc)}
         return {"id": req_id, "error": f"{type(exc).__name__}: {exc}"}
 
 
