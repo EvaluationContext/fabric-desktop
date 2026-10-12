@@ -252,3 +252,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 10px 16px; border-radius: 6px; background: #323130; color: #fff; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,0.2);
 }
 .toast.error { background: var(--danger); }
+
+/* Startup component check */
+.startup-rows { display: flex; flex-direction: column; gap: 10px; }
+.startup-row { display: grid; grid-template-columns: 16px 120px 1fr; gap: 10px; align-items: start; font-size: 13px; }
+.startup-name { font-weight: 600; }
+.startup-detail { color: var(--muted); overflow-wrap: anywhere; }
+.startup-mark { width: 10px; height: 10px; margin: 4px 3px; border-radius: 50%; background: var(--border-input); }
+.startup-row[data-status="ok"] .startup-mark { background: var(--accent); }
+.startup-row[data-status="update"] .startup-mark,
+.startup-row[data-status="warn"] .startup-mark { background: #c27c0e; }
+.startup-row[data-status="error"] .startup-mark { background: var(--danger); }
+.startup-row[data-status="error"] .startup-detail { color: var(--danger); }
+.startup-row[data-status="busy"] .startup-mark { background: none; border: 2px solid var(--accent); border-top-color: transparent; animation: spin 0.8s linear infinite; }
+.startup-log { max-height: 180px; overflow-y: auto; margin: 0; padding: 8px; border-radius: 4px; background: var(--canvas); font: 11px/1.4 var(--mono); white-space: pre-wrap; }
+@keyframes spin { to { transform: rotate(360deg); } }
