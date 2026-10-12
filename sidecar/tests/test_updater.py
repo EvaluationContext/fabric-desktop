@@ -53,6 +53,7 @@ def test_latest_release_offline(monkeypatch):
 
 def test_install_sidecar_reinstalls_from_commit(monkeypatch):
     calls = []
+    monkeypatch.setattr(updater, "load_error", lambda: None)
     monkeypatch.setattr(updater.subprocess, "call", lambda cmd, **kwargs: calls.append(cmd) or 0)
     assert updater.install_sidecar(SHA) == 0
     url = f"https://github.com/KratosDataGod/fabric-desktop/archive/{SHA}.zip#subdirectory=sidecar"
@@ -67,10 +68,30 @@ def test_install_sidecar_stops_on_failure(monkeypatch):
     assert len(calls) == 1
 
 
+def test_install_sidecar_fails_when_it_does_not_start(monkeypatch, capsys):
+    monkeypatch.setattr(updater.subprocess, "call", lambda cmd, **kwargs: 0)
+    monkeypatch.setattr(updater, "load_error", lambda: "ModuleNotFoundError: No module named 'fabric_desktop.meta'")
+    assert updater.install_sidecar(SHA) == 1
+    assert "fabric_desktop.meta" in capsys.readouterr().out
+
+
+def test_load_error_reports_last_line(monkeypatch):
+    class Done:
+        returncode = 1
+        stderr = "Traceback (most recent call last):\n  ...\nModuleNotFoundError: No module named 'x'\n"
+    monkeypatch.setattr(updater.subprocess, "run", lambda *a, **k: Done())
+    assert updater.load_error() == "ModuleNotFoundError: No module named 'x'"
+
+
+def test_load_error_none_when_it_starts():
+    assert updater.load_error() is None  # the sidecar under test is installed
+
+
 def test_check_reports_python(monkeypatch, capsys):
     monkeypatch.setattr(updater, "latest_release", lambda: {"commit": SHA, "error": None})
     assert updater.main(["check"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["python_ok"] is True
     assert report["latest"]["commit"] == SHA
-    assert set(report["sidecar"]) == {"version", "commit", "editable"}
+    assert set(report["sidecar"]) == {"version", "commit", "editable", "error"}
+    assert report["sidecar"]["error"] is None

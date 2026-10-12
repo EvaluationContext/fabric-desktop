@@ -18,6 +18,12 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q
+      # Users get a regular (not editable) install, so check that one has every module.
+      - name: Check the installed package
+        shell: bash
+        run: |
+          python -m pip install --no-deps --target "$RUNNER_TEMP/installed" .
+          cd "$RUNNER_TEMP" && PYTHONPATH=installed python -c "import fabric_desktop.server"
 
   shell:
     runs-on: windows-latest
