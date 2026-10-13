@@ -78,7 +78,7 @@ lakehouse.write_table(by_region, "dbo.sales_by_region")  # Delta table written s
 - **Stop** ends the running cell by restarting the kernel, which clears its variables.
 - Notebooks autosave as `.ipynb` files in `%LOCALAPPDATA%\FabricDesktop\notebooks`. **Publish to OneLake** also saves the notebook as a notebook item in the attached lakehouse's workspace.
 
-**Monitor** has two halves. The top lists what ran on this PC: metadata runs in Dev and notebook table writes, newest first. The bottom is Fabric's own Monitoring hub, the live page from the Fabric service shown in a second webview inside the app window, so Fabric Desktop adds no monitoring code of its own there. Sign in to Fabric in that view once and the sign-in is kept. Links that leave Fabric open in your default browser.
+**Monitor** has two halves. The top lists what ran on this PC: metadata runs in Dev and notebook table writes, newest first. The bottom is Fabric's own Monitoring hub, the live page from the Fabric service shown in a second webview inside the app window, so Fabric Desktop adds no monitoring code of its own there. That view signs in with your Windows account when it is the same work account you use in the app, so there is no password prompt. It opens in the tenant of your app sign-in, which skips Fabric's email page. If Windows is signed in with another account, Fabric asks you to sign in once, and the sign-in is kept. Links that leave Fabric open in your default browser.
 
 Icons are [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT).
 

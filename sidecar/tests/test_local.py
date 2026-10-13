@@ -82,3 +82,20 @@ def test_server_starts_without_stderr(tmp_path):
                          preexec_fn=lambda: os.close(2))
     assert out.returncode == 0
     assert json.loads(out.stdout)["id"] == 1
+
+
+def test_signed_in_tenant_comes_from_the_msal_account():
+    from fabric_desktop.auth import Authenticator
+
+    class App:
+        def __init__(self, accounts):
+            self.accounts = accounts
+
+        def get_accounts(self):
+            return self.accounts
+
+    auth = Authenticator.__new__(Authenticator)
+    auth.app = App([{"username": "chris@contoso.com", "home_account_id": "oid-1.72f988bf-86f1-41af-91ab-2d7cd011db47"}])
+    assert auth.signed_in_tenant() == "72f988bf-86f1-41af-91ab-2d7cd011db47"
+    auth.app = App([])
+    assert auth.signed_in_tenant() is None

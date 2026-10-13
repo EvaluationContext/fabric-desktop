@@ -134,6 +134,7 @@ async function signIn() {
   const result = await attempt(() => rpc("sign_in"), "Sign-in failed");
   if (!result) return false;
   state.user = result.user;
+  state.tenant = result.tenant;
   renderChrome();
   await loadWorkspaces();
   return true;
@@ -336,7 +337,7 @@ function placeFabricView() {
     }
     const r = slot.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return;
-    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height }).catch((err) => {
+    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height, tenant: state.tenant || null }).catch((err) => {
       slot.replaceChildren(h("p", { class: "muted-text" }, `The Fabric view could not open: ${err}`));
     });
   });
@@ -1256,6 +1257,7 @@ checkComponents().finally(() => {
     const env = await rpc("environment");
     state.python = env.python;
     state.user = env.user;
+    state.tenant = env.tenant;
     render();
   }, "Could not start the Python sidecar");
 });

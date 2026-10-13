@@ -62,3 +62,9 @@ class Authenticator:
     def signed_in_user(self) -> str | None:
         accounts = self.app.get_accounts()
         return accounts[0].get("username") if accounts else None
+
+    def signed_in_tenant(self) -> str | None:
+        """Directory (tenant) ID of the signed-in account; MSAL keeps it as "<object id>.<tenant id>"."""
+        accounts = self.app.get_accounts()
+        home = accounts[0].get("home_account_id", "") if accounts else ""
+        return home.split(".", 1)[1] if "." in home else None
