@@ -1132,7 +1132,7 @@ document.querySelectorAll("#rail .rail-item[data-view]").forEach((el) => {
 });
 document.getElementById("account").addEventListener("click", (e) => {
   if (!state.user) { signIn().then((ok) => ok && render()); return; }
-  showMenu(e.currentTarget, [{ info: `Signed in as ${state.user}` }]);
+  showMenu(e.currentTarget, [{ info: `Signed in as ${state.user}` }, { info: `Fabric Desktop build ${state.build || "unknown"}` }]);
 });
 document.getElementById("search").addEventListener("input", (e) => {
   state.query = e.target.value;
@@ -1188,28 +1188,28 @@ async function checkComponents() {
   set("python", report.python_ok ? "ok" : "error",
     report.python_ok ? report.python : `${report.python} is too old. Fabric Desktop needs Python 3.11 or later.`);
 
+  state.build = app.commit ? short(app.commit) : `${app.version} (local build)`;
   if (!app.commit) set("app", "ok", `${app.version}, local build (update check off)`);
-  else if (!latest.commit) set("app", "warn", `Build ${short(app.commit)}. Could not check for a newer build.`);
+  else if (app.updated_to && app.updated_to !== app.commit) {
+    set("app", "error", `The update didn't take: this is still build ${short(app.commit)}, not ${short(app.updated_to)}. ` +
+      "Download fabric-desktop.exe again from the latest release.");
+  } else if (!latest.commit) set("app", "warn", `Build ${short(app.commit)}. Could not check for a newer build (${latest.error}).`);
   else if (latest.commit === app.commit) set("app", "ok", `Up to date (build ${short(app.commit)})`);
   else {
-    set("app", "update", `Build ${short(latest.commit)} is available. You have ${short(app.commit)}.`);
-    if (await choose("Update now", "Later") === 0) {
-      set("app", "busy", "Downloading…");
-      const unlisten = await listen((line) => {
-        const m = /^progress (\d+)/.exec(line);
-        if (m) set("app", "busy", `Downloading… ${m[1]}%`);
-      });
-      try {
-        await invoke("update_app");
-        set("app", "ok", "Restarting…");
-        return new Promise(() => {});  // the new exe takes over
-      } catch (err) {
-        set("app", "warn", `Update failed: ${err}`);
-      } finally {
-        unlisten();
-      }
-    } else {
-      set("app", "warn", `Update skipped. Still on build ${short(app.commit)}.`);
+    // A newer build is installed straight away, so nobody keeps running an old one.
+    set("app", "busy", `Updating to build ${short(latest.commit)}…`);
+    const unlisten = await listen((line) => {
+      const m = /^progress (\d+)/.exec(line);
+      if (m) set("app", "busy", `Downloading build ${short(latest.commit)}… ${m[1]}%`);
+    });
+    try {
+      await invoke("update_app", { commit: latest.commit });
+      set("app", "ok", "Restarting…");
+      return new Promise(() => {});  // the new exe takes over
+    } catch (err) {
+      set("app", "error", `Update to build ${short(latest.commit)} failed: ${err} You are still on ${short(app.commit)}.`);
+    } finally {
+      unlisten();
     }
   }
 
