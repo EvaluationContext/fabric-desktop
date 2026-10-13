@@ -14,6 +14,7 @@ from typing import IO
 from .service import Service
 
 METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "create_lakehouse",
+           "catalog", "endorsements", "set_favorite",
            "list_tables", "list_files", "preview_job", "run_job", "history",
            "run_cell", "restart_kernel", "list_notebooks", "new_notebook", "open_notebook",
            "save_notebook", "rename_notebook", "delete_notebook", "publish_notebook",

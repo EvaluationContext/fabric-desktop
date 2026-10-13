@@ -9,6 +9,7 @@ from typing import Any, Callable
 import requests
 
 API = "https://api.fabric.microsoft.com/v1"
+POWERBI_ADMIN = "https://api.powerbi.com/v1.0/myorg/admin"
 
 
 class FabricError(RuntimeError):
@@ -80,6 +81,34 @@ class FabricClient:
 
     def list_lakehouses(self, workspace_id: str) -> list[dict[str, Any]]:
         return self._paged(f"/workspaces/{workspace_id}/lakehouses")
+
+    def scan_endorsements(self, workspace_ids: list[str], timeout: float = 60) -> dict[str, str]:
+        """Item id -> endorsement ("Certified" or "Promoted") from the admin workspace scan.
+
+        Needs a Fabric admin token. The scan takes up to 100 workspaces per request."""
+        found: dict[str, str] = {}
+        for start in range(0, len(workspace_ids), 100):
+            batch = workspace_ids[start:start + 100]
+            scan = self._request("POST", f"{POWERBI_ADMIN}/workspaces/getInfo", json={"workspaces": batch}).json()
+            deadline = time.monotonic() + timeout
+            while True:
+                status = self._request("GET", f"{POWERBI_ADMIN}/workspaces/scanStatus/{scan['id']}").json()
+                if status.get("status") == "Succeeded":
+                    break
+                if status.get("status") not in ("NotStarted", "Running") or time.monotonic() > deadline:
+                    raise FabricError(f"The admin scan did not finish: {status}")
+                self._sleep(2)
+            result = self._request("GET", f"{POWERBI_ADMIN}/workspaces/scanResult/{scan['id']}").json()
+            for ws in result.get("workspaces", []):
+                # Items come in one list per type (datasets, reports, Lakehouse, ...).
+                for items in ws.values():
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        endorsement = isinstance(item, dict) and (item.get("endorsementDetails") or {}).get("endorsement")
+                        if endorsement and endorsement != "None" and item.get("id"):
+                            found[item["id"]] = endorsement
+        return found
 
     def create_lakehouse(self, workspace_id: str, name: str, description: str = "") -> dict[str, Any]:
         """Create a schema-enabled lakehouse."""
