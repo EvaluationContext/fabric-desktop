@@ -9,7 +9,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tauri::Emitter;
+use tauri::webview::{NewWindowResponse, WebviewBuilder};
+use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl};
 
 const SIDECAR_EXITED: &str = "The Python sidecar stopped. It will restart on the next action.";
 
@@ -232,6 +233,82 @@ async fn update_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ---- Fabric's own Monitoring hub, shown in a second webview docked into the Monitor page.
+// Fabric pages refuse to load in an iframe, but a separate webview is a browser of its own.
+
+const FABRIC_VIEW: &str = "fabric";
+const FABRIC_MONITOR: &str = "https://app.fabric.microsoft.com/monitoringhub?experience=fabric-developer";
+
+/// Sign-in and Fabric's own pages stay in the view; any other link opens in the default browser.
+fn stays_in_view(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    ["microsoft.com", "microsoftonline.com", "powerbi.com", "live.com", "msauth.net", "msftauth.net"]
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
+fn open_in_browser(url: &Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "https" | "http") {
+        return Err(format!("Not opening {url}"));
+    }
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url.as_str()]);
+        c
+    } else {
+        let mut c = Command::new("xdg-open");
+        c.arg(url.as_str());
+        c
+    };
+    hide_window(&mut cmd);
+    cmd.spawn().map(|_| ()).map_err(|e| format!("Could not open the browser: {e}"))
+}
+
+/// Shows the Fabric view over the page's placeholder, creating it the first time.
+/// Coordinates are CSS pixels inside the window, which are Tauri's logical pixels.
+#[tauri::command]
+async fn fabric_view_show(app: tauri::AppHandle, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    let position = LogicalPosition::new(x, y);
+    let size = LogicalSize::new(width.max(1.0), height.max(1.0));
+    if let Some(view) = app.get_webview(FABRIC_VIEW) {
+        view.set_position(position).map_err(|e| e.to_string())?;
+        view.set_size(size).map_err(|e| e.to_string())?;
+        return view.show().map_err(|e| e.to_string());
+    }
+    let window = app.get_window("main").ok_or("The main window is not open")?;
+    let url = Url::parse(FABRIC_MONITOR).map_err(|e| e.to_string())?;
+    let builder = WebviewBuilder::new(FABRIC_VIEW, WebviewUrl::External(url)).on_new_window(|url, _| {
+        if stays_in_view(&url) {
+            NewWindowResponse::Allow
+        } else {
+            let _ = open_in_browser(&url);
+            NewWindowResponse::Deny
+        }
+    });
+    window.add_child(builder, position, size).map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn fabric_view_hide(app: tauri::AppHandle) -> Result<(), String> {
+    match app.get_webview(FABRIC_VIEW) {
+        Some(view) => view.hide().map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
+/// back, reload, home, or browser (open the current page in the default browser).
+#[tauri::command]
+async fn fabric_view_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
+    let view = app.get_webview(FABRIC_VIEW).ok_or("The Fabric view is not open")?;
+    match action.as_str() {
+        "back" => view.eval("history.back()").map_err(|e| e.to_string()),
+        "reload" => view.reload().map_err(|e| e.to_string()),
+        "home" => view.navigate(Url::parse(FABRIC_MONITOR).map_err(|e| e.to_string())?).map_err(|e| e.to_string()),
+        "browser" => open_in_browser(&view.url().map_err(|e| e.to_string())?),
+        _ => Err(format!("unknown action {action}")),
+    }
+}
+
 fn main() {
     // Left behind by the last update; the old process has exited by now.
     if let Ok(exe) = std::env::current_exe() {
@@ -240,7 +317,10 @@ fn main() {
     }
     tauri::Builder::default()
         .manage(SidecarState { sidecar: Mutex::new(None), child: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![rpc, stop_kernel, check_components, update_sidecar, update_app])
+        .invoke_handler(tauri::generate_handler![
+            rpc, stop_kernel, check_components, update_sidecar, update_app,
+            fabric_view_show, fabric_view_hide, fabric_view_action
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Fabric Desktop");
 }

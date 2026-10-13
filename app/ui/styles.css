@@ -253,6 +253,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   white-space: pre-line; overflow-wrap: anywhere; user-select: text;
 }
 .toast.error { background: var(--danger); }
+.toast.top { bottom: auto; top: 56px; }
 
 /* Startup component check */
 .startup-rows { display: flex; flex-direction: column; gap: 10px; }
@@ -343,3 +344,15 @@ h2.flush { margin: 0; }
 .list select { min-height: 28px; border: 1px solid var(--border-input); border-radius: 4px; background: var(--surface); }
 .page h1 .mono { font-size: 21px; }
 .mini td.n { white-space: nowrap; }
+
+/* Monitor: local runs on top, Fabric's Monitoring hub docked below */
+.page.monitor { display: flex; flex-direction: column; gap: 14px; overflow: hidden; padding: 20px 24px; }
+.page.monitor > .card { margin-top: 0; }
+.monitor-band { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.page .monitor-band h2 { margin: 0; font-size: 15px; }
+.monitor-local { flex: 0 1 auto; max-height: 38%; display: flex; flex-direction: column; min-height: 120px; }
+.monitor-scroll { overflow: auto; }
+.monitor-scroll .list { border: 0; border-radius: 0; }
+.monitor-empty { padding: 14px; margin: 0; }
+.monitor-fabric { flex: 1; min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
+.fabric-slot { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; }

@@ -55,7 +55,8 @@ function hydrateIcons(root = document) {
 function toast(text, isError = false) {
   const t = document.getElementById("toast");
   t.textContent = text;
-  t.className = isError ? "toast error" : "toast";
+  // On Monitor the bottom of the window is Fabric's native view, which would cover the toast.
+  t.className = `toast${isError ? " error" : ""}${state.view === "monitor" ? " top" : ""}`;
   t.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => { t.hidden = true; }, isError ? 8000 : 4000);
@@ -205,6 +206,7 @@ function renderChrome() {
 
 function render() {
   renderChrome();
+  if (state.view !== "monitor") placeFabricView();
   const views = { home: renderHome, create: renderCreate, workspaces: renderWorkspaces, workspace: renderWorkspace,
     onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, notebook: renderNotebook, ...window.META_VIEWS };
   (views[state.view] || renderHome)();
@@ -261,20 +263,87 @@ function renderCreate() {
 }
 
 async function renderMonitor() {
-  const body = h("div", { class: "muted-text" }, "Loading runs...");
-  setView(h("div", { class: "page" }, h("h1", {}, "Monitor"),
-    h("p", { class: "sub" }, "Every table this PC has written to OneLake."), body));
-  const runs = (await attempt(() => rpc("history"))) || [];
+  const local = h("div", { class: "muted-text monitor-empty" }, "Loading runs...");
+  const slot = h("div", { class: "fabric-slot" },
+    h("p", { class: "muted-text" }, "Opening the Fabric Monitoring hub. Sign in once and the app remembers it."));
+  const action = (name) => attempt(() => invoke("fabric_view_action", { action: name }), "Fabric view");
+  setView(h("div", { class: "page monitor" },
+    h("section", { class: "card monitor-local" },
+      h("div", { class: "monitor-band" },
+        h("h2", {}, "On this PC"),
+        h("span", { class: "muted-text" }, "Metadata runs (Dev) and notebook writes from Fabric Desktop, newest first"),
+        h("span", { class: "spacer" }),
+        btn("Refresh", "sync", () => render(), "tool outline")),
+      local),
+    h("section", { class: "card monitor-fabric" },
+      h("div", { class: "monitor-band" },
+        h("h2", {}, "In Fabric"),
+        h("span", { class: "muted-text" }, "Fabric's own Monitoring hub"),
+        h("span", { class: "spacer" }),
+        btn("Back", null, () => action("back"), "tool outline"),
+        btn("Home", "home", () => action("home"), "tool outline"),
+        btn("Reload", "restart", () => action("reload"), "tool outline"),
+        btn("Open in browser", "publish", () => action("browser"), "tool outline")),
+      slot)));
+  dockFabricView(slot);
+
+  const [writes, runs] = await Promise.all([
+    attempt(() => rpc("history")),
+    rpc("meta_runs", { env: "dev" }).catch(() => []),  // no metadata project yet
+  ]);
   if (state.view !== "monitor") return;
-  const shown = runs.filter((r) => matches(`${r.job} ${r.table_uri}`));
-  body.replaceWith(shown.length ? h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, ["Finished", "Activity", "Table", "Mode", "Rows", "Delta version", "Seconds"].map((c) => h("th", {}, c)))),
-    h("tbody", {}, shown.map((r) => h("tr", {},
-      h("td", {}, new Date(r.finished_at).toLocaleString()), h("td", {}, r.job),
-      h("td", { title: r.table_uri }, r.table_uri.split("/Tables/")[1] || r.table_uri),
-      h("td", {}, r.mode), h("td", {}, r.rows), h("td", {}, r.delta_version), h("td", {}, r.seconds))))) :
-    h("p", { class: "muted-text" }, "No runs yet. Write a table from a notebook and it shows up here."));
+  const rows = [
+    ...(runs || []).map((r) => ({
+      at: r.started_at, status: r.status, activity: r.entity, kind: "Metadata run", env: r.env,
+      seconds: r.seconds, rows: r.rows_written,
+      detail: r.quarantined ? `${r.quarantined} quarantined` : (r.status === "ok" ? "" : r.message || ""),
+      open: () => showRun(r.run_id),
+    })),
+    ...(writes || []).map((r) => ({
+      at: r.finished_at, status: "ok", activity: r.job, kind: "Notebook write", env: "",
+      seconds: r.seconds, rows: r.rows, detail: `${r.table_uri.split("/Tables/")[1] || r.table_uri} (${r.mode}, v${r.delta_version})`,
+    })),
+  ].filter((r) => matches(`${r.activity} ${r.kind} ${r.detail}`))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  local.replaceWith(rows.length ? h("div", { class: "monitor-scroll" }, h("table", { class: "list" },
+    h("thead", {}, h("tr", {}, ["Status", "Activity", "Kind", "Env", "When", "Seconds", "Rows", "Details"].map((c) => h("th", {}, c)))),
+    h("tbody", {}, rows.map((r) => h("tr", r.open ? { class: "click", onclick: r.open } : {},
+      h("td", {}, statusPill(r.status)), h("td", {}, r.activity), h("td", {}, r.kind), h("td", {}, r.env),
+      h("td", {}, new Date(r.at).toLocaleString()), h("td", {}, r.seconds), h("td", {}, r.rows ?? ""),
+      h("td", { class: "muted-text" }, r.detail)))))) :
+    h("p", { class: "muted-text monitor-empty" }, "Nothing has run on this PC yet. Run a metadata entity or write a table from a notebook."));
 }
+
+// Fabric's Monitoring hub is a second webview the shell lays over the slot's box. It is a
+// native view, so it is hidden whenever the slot isn't showing or a dialog is open over it.
+const fabricView = { slot: null, observer: null, frame: 0 };
+
+function dockFabricView(slot) {
+  fabricView.observer?.disconnect();
+  fabricView.slot = slot;
+  fabricView.observer = new ResizeObserver(placeFabricView);
+  fabricView.observer.observe(slot);
+}
+
+function placeFabricView() {
+  cancelAnimationFrame(fabricView.frame);
+  fabricView.frame = requestAnimationFrame(() => {
+    const slot = fabricView.slot;
+    const covered = document.getElementById("dialog-root").childElementCount > 0;
+    if (state.view !== "monitor" || !slot?.isConnected || covered) {
+      invoke("fabric_view_hide").catch(() => {});
+      return;
+    }
+    const r = slot.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return;
+    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height }).catch((err) => {
+      slot.replaceChildren(h("p", { class: "muted-text" }, `The Fabric view could not open: ${err}`));
+    });
+  });
+}
+
+window.addEventListener("resize", placeFabricView);
+new MutationObserver(placeFabricView).observe(document.getElementById("dialog-root"), { childList: true });
 
 // ---------- Workspaces, OneLake, lakehouse ----------
 
