@@ -194,9 +194,13 @@ async fn check_components() -> Result<Value, String> {
     }
     let mut report: Value = serde_json::from_slice(&out.stdout)
         .map_err(|_| "Python gave an unexpected answer to the startup check.".to_string())?;
+    // Set by the exe that updated us, so the check can tell whether the update took.
+    let args: Vec<String> = std::env::args().collect();
+    let updated_to = args.iter().position(|a| a == "--updated-to").and_then(|i| args.get(i + 1));
     report["app"] = json!({
         "version": env!("CARGO_PKG_VERSION"),
         "commit": if BUILD_COMMIT.is_empty() { Value::Null } else { json!(BUILD_COMMIT) },
+        "updated_to": updated_to,
     });
     Ok(report)
 }
@@ -213,14 +217,18 @@ async fn update_sidecar(app: tauri::AppHandle, state: tauri::State<'_, SidecarSt
     stream(&app, updater(&["install-sidecar", BUILD_COMMIT]))
 }
 
-/// Downloads the latest exe, swaps it in place of this one and starts it.
+/// Downloads the latest exe (refusing any build but `commit`), swaps it in place of this
+/// one and starts it.
 #[tauri::command]
-async fn update_app(app: tauri::AppHandle) -> Result<(), String> {
+async fn update_app(app: tauri::AppHandle, commit: String) -> Result<(), String> {
+    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("{commit} is not a build commit"));
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let new = exe.with_extension("exe.new");
     let old = exe.with_extension("exe.old");
     let dest = new.to_string_lossy().into_owned();
-    stream(&app, updater(&["download-app", &dest]))?;
+    stream(&app, updater(&["download-app", &dest, &commit]))?;
     // Windows lets a running exe be renamed but not overwritten.
     let _ = std::fs::remove_file(&old);
     std::fs::rename(&exe, &old).map_err(|e| format!("Could not replace {}: {e}", exe.display()))?;
@@ -228,7 +236,10 @@ async fn update_app(app: tauri::AppHandle) -> Result<(), String> {
         let _ = std::fs::rename(&old, &exe);
         return Err(format!("Could not replace {}: {e}", exe.display()));
     }
-    Command::new(&exe).spawn().map_err(|e| format!("Updated, but could not restart: {e}"))?;
+    Command::new(&exe)
+        .args(["--updated-to", &commit])
+        .spawn()
+        .map_err(|e| format!("Updated, but could not restart: {e}"))?;
     app.exit(0);
     Ok(())
 }

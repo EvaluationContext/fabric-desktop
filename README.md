@@ -45,7 +45,7 @@ Download [fabric-desktop.exe](https://github.com/KratosDataGod/fabric-desktop/re
 
 Each time it starts, the app checks its components before anything else runs:
 
-- **Fabric Desktop:** if a newer build has been released, it offers to download it, replaces the exe in place and restarts.
+- **Fabric Desktop:** if a newer build has been released, it downloads it straight away, checks the file really is that build, replaces the exe in place and restarts. The account menu shows which build is running.
 - **Python:** it must be 3.11 or later.
 - **Local engine (the sidecar):** the app installs the sidecar from the same commit the exe was built from, with pip, so the two always match. A missing or older sidecar is installed or updated automatically, with pip's output shown while it runs. An editable (`pip install -e`) install is left alone.
 

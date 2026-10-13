@@ -44,11 +44,68 @@ def test_installed_sidecar_missing(monkeypatch):
     assert updater.installed_sidecar()["version"] is None
 
 
+class FakeResponse:
+    def __init__(self, body: bytes):
+        self.body, self.headers = body, {"Content-Length": str(len(body))}
+
+    def read(self, n=-1):
+        out, self.body = (self.body, b"") if n < 0 else (self.body[:n], self.body[n:])
+        return out
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def serve(monkeypatch, routes):
+    """Fake urlopen: the first route whose key is in the URL answers; an exception is raised."""
+    seen = []
+
+    def urlopen(req, timeout=None):
+        url = req.full_url
+        seen.append((url, req.get_header("Cache-control")))
+        for key, answer in routes.items():
+            if key in url:
+                if isinstance(answer, Exception):
+                    raise answer
+                return FakeResponse(answer() if callable(answer) else answer)
+        raise OSError(f"no route for {url}")
+    monkeypatch.setattr(updater.urllib.request, "urlopen", urlopen)
+    return seen
+
+
 def test_latest_release_offline(monkeypatch):
-    def offline(*args, **kwargs):
-        raise OSError("no network")
-    monkeypatch.setattr(updater.urllib.request, "urlopen", offline)
-    assert updater.latest_release() == {"commit": None, "error": "OSError: no network"}
+    serve(monkeypatch, {"github": OSError("no network")})
+    result = updater.latest_release()
+    assert result["commit"] is None and "no network" in result["error"]
+
+
+def test_latest_release_asks_the_api_without_caches(monkeypatch):
+    seen = serve(monkeypatch, {"api.github.com": json.dumps({"target_commitish": SHA}).encode()})
+    assert updater.latest_release() == {"commit": SHA, "error": None}
+    assert seen == [(updater.API, "no-cache")]
+
+
+def test_latest_release_falls_back_to_version_json(monkeypatch):
+    other = "f" * 40
+    seen = serve(monkeypatch, {"api.github.com": OSError("rate limited"),
+                               "version.json": json.dumps({"commit": other}).encode()})
+    assert updater.latest_release() == {"commit": other, "error": None}
+    assert "nocache=" in seen[1][0]
+
+
+def test_download_app_checks_the_build(monkeypatch, tmp_path):
+    serve(monkeypatch, {"fabric-desktop.exe": b"MZ..." + SHA.encode() + b"..."})
+    assert updater.download_app(str(tmp_path / "new.exe"), SHA) == 0
+
+
+def test_download_app_refuses_a_stale_copy(monkeypatch, tmp_path, capsys):
+    seen = serve(monkeypatch, {"fabric-desktop.exe": b"MZ...old build..."})
+    assert updater.download_app(str(tmp_path / "new.exe"), SHA) == 1
+    assert len(seen) == 2 and "nocache=" in seen[1][0]
+    assert "not build 0123456 yet" in capsys.readouterr().out
 
 
 def test_install_sidecar_reinstalls_from_commit(monkeypatch):
