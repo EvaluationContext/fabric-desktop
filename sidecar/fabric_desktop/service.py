@@ -48,17 +48,18 @@ class Service(MetaMixin):
     # Each public method is one UI action.
 
     def environment(self) -> dict[str, Any]:
-        user = None
+        user = tenant = None
         try:
             user = self.auth.signed_in_user()
+            tenant = self.auth.signed_in_tenant()
         except Exception:  # no client ID yet, or offline: the UI offers sign-in
             pass
-        return {"python": platform.python_version(), "user": user}
+        return {"python": platform.python_version(), "user": user, "tenant": tenant}
 
     def sign_in(self) -> dict[str, Any]:
         self.auth.fabric_token()
         self.auth.storage_token()
-        return {"user": self.auth.signed_in_user()}
+        return {"user": self.auth.signed_in_user(), "tenant": self.auth.signed_in_tenant()}
 
     def list_workspaces(self) -> list[dict[str, Any]]:
         return self.fabric.list_workspaces()

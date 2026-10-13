@@ -278,7 +278,14 @@ fn open_in_browser(url: &Url) -> Result<(), String> {
 /// Shows the Fabric view over the page's placeholder, creating it the first time.
 /// Coordinates are CSS pixels inside the window, which are Tauri's logical pixels.
 #[tauri::command]
-async fn fabric_view_show(app: tauri::AppHandle, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+async fn fabric_view_show(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    tenant: Option<String>,
+) -> Result<(), String> {
     let position = LogicalPosition::new(x, y);
     let size = LogicalSize::new(width.max(1.0), height.max(1.0));
     if let Some(view) = app.get_webview(FABRIC_VIEW) {
@@ -287,16 +294,89 @@ async fn fabric_view_show(app: tauri::AppHandle, x: f64, y: f64, width: f64, hei
         return view.show().map_err(|e| e.to_string());
     }
     let window = app.get_window("main").ok_or("The main window is not open")?;
-    let url = Url::parse(FABRIC_MONITOR).map_err(|e| e.to_string())?;
-    let builder = WebviewBuilder::new(FABRIC_VIEW, WebviewUrl::External(url)).on_new_window(|url, _| {
-        if stays_in_view(&url) {
-            NewWindowResponse::Allow
-        } else {
-            let _ = open_in_browser(&url);
-            NewWindowResponse::Deny
+    let builder = WebviewBuilder::new(FABRIC_VIEW, WebviewUrl::External(fabric_home(tenant.as_deref())?))
+        .on_new_window(|url, _| {
+            if stays_in_view(&url) {
+                NewWindowResponse::Allow
+            } else {
+                let _ = open_in_browser(&url);
+                NewWindowResponse::Deny
+            }
+        });
+    #[cfg(windows)]
+    let builder = match sso::environment(&app) {
+        Ok(environment) => builder.with_environment(environment),
+        Err(e) => {
+            eprintln!("Fabric view: Windows sign-in is not available ({e}); Fabric will ask for the account.");
+            builder
         }
-    });
+    };
     window.add_child(builder, position, size).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// The Monitoring hub URL. With the tenant of the account signed in to the app, Fabric skips
+/// its "Enter your work or school email" page and goes straight to that directory's sign-in.
+fn fabric_home(tenant: Option<&str>) -> Result<Url, String> {
+    let mut url = Url::parse(FABRIC_MONITOR).map_err(|e| e.to_string())?;
+    if let Some(tenant) = tenant.filter(|t| t.len() == 36 && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')) {
+        url.query_pairs_mut().append_pair("ctid", tenant).append_pair("noSignUpCheck", "1");
+    }
+    Ok(url)
+}
+
+/// The Fabric view gets its own WebView2 environment that may sign in with the Windows account
+/// (AllowSingleSignOnUsingOSPrimaryAccount), so a work account signed in to Windows needs no
+/// password. It uses its own profile folder: WebView2 refuses two option sets on one folder.
+#[cfg(windows)]
+mod sso {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2Environment, ICoreWebView2EnvironmentOptions,
+    };
+    use webview2_com::{CoreWebView2EnvironmentOptions, CreateCoreWebView2EnvironmentCompletedHandler};
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{E_POINTER, E_UNEXPECTED};
+
+    /// COM objects are not Send; this one is only created and used on the main thread.
+    struct OnMainThread(ICoreWebView2Environment);
+    unsafe impl Send for OnMainThread {}
+
+    pub fn environment(app: &tauri::AppHandle) -> Result<ICoreWebView2Environment, String> {
+        let folder = super::data_dir().join("fabric-view");
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(create(&folder).map(OnMainThread));
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?.map(|env| env.0)
+    }
+
+    fn create(folder: &std::path::Path) -> Result<ICoreWebView2Environment, String> {
+        let options = CoreWebView2EnvironmentOptions::default();
+        unsafe {
+            // Same arguments wry uses for the main view.
+            options.set_additional_browser_arguments(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection".to_string(),
+            );
+            options.set_allow_single_sign_on_using_os_primary_account(true);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        unsafe {
+            CreateCoreWebView2EnvironmentWithOptions(
+                PCWSTR::null(),
+                &HSTRING::from(folder.as_os_str()),
+                &ICoreWebView2EnvironmentOptions::from(options),
+                &CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |error_code, environment| {
+                    let result = (|| {
+                        error_code?;
+                        environment.ok_or_else(|| windows::core::Error::from(E_POINTER))
+                    })();
+                    tx.send(result).map_err(|_| windows::core::Error::from(E_UNEXPECTED))
+                })),
+            )
+        }
+        .map_err(|e| e.to_string())?;
+        webview2_com::wait_with_pump(rx).map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
