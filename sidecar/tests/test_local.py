@@ -99,3 +99,39 @@ def test_signed_in_tenant_comes_from_the_msal_account():
     assert auth.signed_in_tenant() == "72f988bf-86f1-41af-91ab-2d7cd011db47"
     auth.app = App([])
     assert auth.signed_in_tenant() is None
+
+
+def test_catalog_lists_lakehouses_across_workspaces_and_keeps_favorites(tmp_path, monkeypatch):
+    from fabric_desktop import service as service_mod
+    from fabric_desktop.service import Service
+
+    class Auth:
+        def fabric_token(self):
+            return "tok"
+
+        def silent_token(self, scopes):
+            return None
+
+    class Client:
+        def __init__(self, token):
+            pass
+
+        def list_workspaces(self):
+            return [{"id": "w1", "displayName": "Sales"}, {"id": "w2", "displayName": "Paused"}]
+
+        def list_lakehouses(self, ws):
+            if ws == "w2":
+                raise RuntimeError("capacity is paused")
+            return [{"id": "lh1", "displayName": "LH_Gold"}]
+
+    monkeypatch.setattr(service_mod, "FabricClient", Client)
+    svc = Service(client_id="x", root=tmp_path)
+    svc._auth = Auth()
+    assert svc.set_favorite("lh1", True) == ["lh1"]
+    catalog = svc.catalog()
+    assert catalog["items"] == [{"workspace_id": "w1", "workspace_name": "Sales", "lakehouse_id": "lh1", "name": "LH_Gold"}]
+    assert catalog["skipped"] == ["Paused"]
+    assert catalog["favorites"] == ["lh1"]
+    assert svc.set_favorite("lh1", False) == []
+    end = svc.endorsements(["w1"])
+    assert end["available"] is False and end["pending"] is False and "admin" in end["reason"]

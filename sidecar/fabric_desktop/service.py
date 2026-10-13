@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import platform
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from .auth import Authenticator
+from .auth import ADMIN_SCOPES, Authenticator
 from .fabric_api import FabricClient
 from . import lakehouse
 from .jobs import Job, run_local
@@ -30,6 +32,8 @@ class Service(MetaMixin):
         self._auth: Authenticator | None = None
         self.kernel = Kernel()
         self.notebooks = NotebookStore(self.root / "notebooks")
+        self._endorse: dict[str, Any] | None = None
+        self._endorse_lock = threading.Lock()
 
     @property
     def auth(self) -> Authenticator:
@@ -66,6 +70,78 @@ class Service(MetaMixin):
 
     def list_lakehouses(self, workspace_id: str) -> list[dict[str, Any]]:
         return self.fabric.list_lakehouses(workspace_id)
+
+    def catalog(self) -> dict[str, Any]:
+        """Every lakehouse in every workspace the user can open, for the Add data items picker."""
+        token = self.auth.fabric_token()  # once: the MSAL cache is not shared across threads
+        workspaces = FabricClient(lambda: token).list_workspaces()
+
+        def lakehouses(ws: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+            try:
+                return ws, FabricClient(lambda: token).list_lakehouses(ws["id"])
+            except Exception:  # e.g. a paused capacity; list the rest
+                return ws, None
+
+        items, skipped = [], []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for ws, found in pool.map(lakehouses, workspaces):
+                if found is None:
+                    skipped.append(ws["displayName"])
+                    continue
+                items += [{"workspace_id": ws["id"], "workspace_name": ws["displayName"],
+                           "lakehouse_id": lh["id"], "name": lh["displayName"]} for lh in found]
+        return {"workspaces": [{"id": w["id"], "displayName": w["displayName"]} for w in workspaces],
+                "items": items, "skipped": skipped, "favorites": sorted(self._favorites())}
+
+    def endorsements(self, workspace_ids: list[str]) -> dict[str, Any]:
+        """Endorsement per lakehouse id, when the account can read Fabric's admin scan.
+
+        The scan takes a while, so it runs in the background and this returns {"pending": True}
+        until it is done; the RPC loop stays free for other calls meanwhile."""
+        with self._endorse_lock:
+            if self._endorse is not None:
+                return dict(self._endorse)
+        token = None
+        try:
+            token = self.auth.silent_token(ADMIN_SCOPES)  # here, not in the thread: MSAL stays single-threaded
+        except Exception:
+            pass
+        if not token:
+            self._endorse = {"pending": False, "available": False, "items": {},
+                             "reason": "Endorsement needs Fabric admin rights and the Tenant.Read.All permission "
+                                       "on the app registration."}
+            return dict(self._endorse)
+        self._endorse = {"pending": True, "available": False, "items": {}, "reason": ""}
+        threading.Thread(target=self._scan_endorsements, args=(token, list(workspace_ids)), daemon=True).start()
+        return dict(self._endorse)
+
+    def _scan_endorsements(self, token: str, workspace_ids: list[str]) -> None:
+        try:
+            result = {"pending": False, "available": True, "reason": "",
+                      "items": FabricClient(lambda: token).scan_endorsements(workspace_ids)}
+        except Exception as e:
+            result = {"pending": False, "available": False, "items": {},
+                      "reason": f"Fabric's admin scan is not available to this account ({e})."}
+        with self._endorse_lock:
+            self._endorse = result
+
+    @property
+    def favorites_file(self) -> Path:
+        return self.root / "favorites.json"
+
+    def _favorites(self) -> set[str]:
+        try:
+            return set(json.loads(self.favorites_file.read_text()))
+        except (OSError, ValueError):
+            return set()
+
+    def set_favorite(self, lakehouse_id: str, favorite: bool) -> list[str]:
+        """Stars are kept on this PC; Fabric has no public API for its own favorites."""
+        favorites = self._favorites()
+        (favorites.add if favorite else favorites.discard)(lakehouse_id)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.favorites_file.write_text(json.dumps(sorted(favorites)))
+        return sorted(favorites)
 
     def create_lakehouse(self, workspace_id: str, name: str) -> dict[str, Any]:
         return self.fabric.create_lakehouse(workspace_id, name)

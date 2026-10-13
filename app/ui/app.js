@@ -640,38 +640,133 @@ async function publishNotebook() {
 
 // ---------- Add data items ----------
 
+// Lakehouses across every workspace, like Fabric's OneLake catalog. Favorites are stars kept on
+// this PC (Fabric has no public favorites API); endorsement comes from Fabric's admin scan when
+// the account may read it.
 async function openDataItems() {
   if (!(await ensureSignedIn())) return;
-  const workspaces = await loadWorkspaces();
-  if (!workspaces.length) { toast("No workspaces found for your account.", true); return; }
-  const current = state.notebook.lakehouse?.workspace_id || state.openWorkspace?.id || workspaces[0].id;
-  const select = h("select", {}, workspaces.map((w) => h("option", { value: w.id, selected: w.id === current }, w.displayName)));
-  const list = h("div", { class: "scroll" });
-  const load = async () => {
-    const ws = workspaces.find((w) => w.id === select.value);
-    list.replaceChildren(h("span", { class: "text" }, "Loading lakehouses..."));
-    const lakehouses = (await attempt(() => rpc("list_lakehouses", { workspace_id: ws.id }), "Could not list lakehouses")) || [];
-    if (select.value !== ws.id) return;
-    list.replaceChildren(...lakehouses.map((lh) => {
-      const attached = state.notebook.lakehouse?.lakehouse_id === lh.id;
-      return h("button", { class: "choice", onclick: () => attachLakehouse(lakehouseRef(ws, lh)) },
-        icon("lakehouse", 20),
-        h("span", { class: "main" }, h("span", { class: "n" }, lh.displayName), h("span", { class: "w" }, ws.displayName)),
-        h("span", { class: "tag" }, attached ? "Attached" : ""));
-    }), lakehouses.length ? "" : h("span", { class: "text" }, "No lakehouses in this workspace yet."));
+  const pick = { scope: "all", query: "", selected: null, catalog: null, layers: {} };
+  const nav = h("nav", { class: "catalog-nav" });
+  const list = h("div", { class: "catalog-list" }, h("p", { class: "muted-text", style: "padding:16px" }, "Loading lakehouses from all workspaces..."));
+  const head = h("div", { class: "catalog-head" });
+  const detail = h("aside", { class: "catalog-detail" });
+  const note = h("span", { class: "muted-text" });
+  const search = h("input", { class: "catalog-search", placeholder: "Filter by name or workspace", "aria-label": "Filter lakehouses" });
+  const attachBtn = btn("Attach", null, () => pick.selected && attachLakehouse(pick.selected), "tool primary", { disabled: true });
+  const newBtn = btn("New lakehouse", "add", async () => {
+    const ws = pick.scope.startsWith("ws:") ? workspaceById(pick.scope.slice(3))
+      : pick.selected ? workspaceById(pick.selected.workspace_id) : null;
+    closeDialog();
+    const view = state.view;
+    const ref = await newLakehouse(ws);
+    if (ref) { state.view = view; attachLakehouse(ref); }
+  }, "tool link");
+  const workspaceById = (id) => pick.catalog?.workspaces.find((w) => w.id === id) || null;
+  const key = (r) => r.lakehouse_id;
+  const favorites = () => new Set(pick.catalog?.favorites || []);
+  const endorsed = () => state.endorsements?.items || {};
+
+  const inScope = (r) => pick.scope === "all" ? true
+    : pick.scope === "fav" ? favorites().has(key(r))
+    : pick.scope === "endorsed" ? !!endorsed()[key(r)]
+    : r.workspace_id === pick.scope.slice(3);
+  const shown = () => (pick.catalog?.items || []).filter((r) => inScope(r)
+    && `${r.name} ${r.workspace_name}`.toLowerCase().includes(pick.query.toLowerCase()));
+
+  const navButton = (scope, label, glyph, count, disabled, title) => h("button", {
+    class: `catalog-scope${pick.scope === scope ? " on" : ""}`, disabled, title,
+    onclick: () => { pick.scope = scope; draw(); },
+  }, h("span", { class: "glyph" }, glyph), h("span", { class: "label" }, label), h("span", { class: "count" }, count));
+
+  const endorsementPill = (r) => {
+    const e = endorsed()[key(r)];
+    return e ? h("span", { class: `pill-s ${e === "Certified" ? "pass" : "info"}` }, e) : "";
   };
-  select.addEventListener("change", load);
-  showDialog("Add data items", h("div", { style: "display:flex;flex-direction:column;gap:12px;min-height:0" },
-    h("span", { class: "text" }, "Choose a lakehouse. The notebook reads its files and writes tables to it through OneLake."),
-    h("label", { class: "field" }, "Workspace", select), list,
-    btn("New lakehouse", "add", async () => {
-      const ws = workspaces.find((w) => w.id === select.value);
-      closeDialog();
-      const view = state.view;
-      const ref = await newLakehouse(ws);
-      if (ref) { state.view = view; attachLakehouse(ref); }
-    }, "tool link", { style: "align-self:flex-start" })));
-  load();
+
+  async function toggleFavorite(r, e) {
+    e.stopPropagation();
+    const on = !favorites().has(key(r));
+    const result = await attempt(() => rpc("set_favorite", { lakehouse_id: key(r), favorite: on }), "Could not save the favorite");
+    if (result) { pick.catalog.favorites = result; draw(); }
+  }
+
+  function select(r, row) {
+    pick.selected = r;
+    // Mark the row in place: redrawing the list would swallow the second click of a double-click.
+    list.querySelectorAll("tr.selected").forEach((tr) => tr.classList.remove("selected"));
+    row?.classList.add("selected");
+    attachBtn.disabled = false;
+    const tree = h("div", { class: "explorer-content", style: "padding:0" });
+    detail.replaceChildren(h("div", { class: "n" }, r.name), h("div", { class: "muted-text" }, `${r.workspace_name} workspace`),
+      endorsementPill(r), h("div", { class: "sec" }, "Contents"), tree);
+    renderTree(tree, r, null);
+  }
+
+  function draw() {
+    const c = pick.catalog;
+    if (!c) return;
+    const items = c.items;
+    const end = state.endorsements;
+    const endorsedTitle = !end || end.pending ? "Checking endorsement..." : end.available ? "" : end.reason;
+    nav.replaceChildren(
+      navButton("all", "All items", "▦", items.length),
+      navButton("fav", "Favorites", "★", items.filter((r) => favorites().has(key(r))).length),
+      navButton("endorsed", "Endorsed", "✓", end?.available ? items.filter((r) => endorsed()[key(r)]).length : "", !end?.available, endorsedTitle),
+      h("div", { class: "sec" }, "Workspaces"),
+      ...c.workspaces.map((w) => navButton(`ws:${w.id}`, w.displayName, "▢", items.filter((r) => r.workspace_id === w.id).length)));
+    const rows = shown();
+    const title = { all: "All items", fav: "Favorites", endorsed: "Endorsed" }[pick.scope] || workspaceById(pick.scope.slice(3))?.displayName;
+    head.replaceChildren(h("span", { class: "t" }, title), h("span", { class: "muted-text" }, `${rows.length} lakehouse${rows.length === 1 ? "" : "s"}`));
+    const attachedId = state.notebook?.lakehouse?.lakehouse_id;
+    list.replaceChildren(rows.length ? h("table", { class: "list" },
+      h("thead", {}, h("tr", {}, h("th", { style: "width:32px" }, ""), h("th", {}, "Name"), h("th", {}, "Location"),
+        h("th", {}, "Endorsement"), h("th", {}, "Layer"), h("th", {}, ""))),
+      h("tbody", {}, rows.map((r) => {
+        const fav = favorites().has(key(r));
+        return h("tr", { class: `click${pick.selected && key(pick.selected) === key(r) ? " selected" : ""}`, onclick: (e) => select(r, e.currentTarget), ondblclick: () => attachLakehouse(r) },
+          h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
+            "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (e) => toggleFavorite(r, e) }, fav ? "★" : "☆")),
+          h("td", {}, h("span", { class: "item" }, icon("lakehouse", 18), r.name)),
+          h("td", {}, r.workspace_name),
+          h("td", {}, endorsementPill(r)),
+          h("td", {}, pick.layers[r.name] || ""),
+          h("td", {}, r.lakehouse_id === attachedId ? h("span", { class: "pill-s pass" }, "Attached") : ""));
+      }))) : h("p", { class: "muted-text", style: "padding:16px" },
+      pick.scope === "fav" && !pick.query ? "No favorites yet. Click the star next to a lakehouse." : "No lakehouses match."));
+    const skipped = c.skipped.length ? `Skipped ${c.skipped.length} workspace${c.skipped.length === 1 ? "" : "s"} that could not be read: ${c.skipped.join(", ")}.` : "";
+    note.textContent = [skipped, end && !end.pending && !end.available ? end.reason : ""].filter(Boolean).join(" ");
+  }
+
+  search.addEventListener("input", () => { pick.query = search.value; draw(); });
+  const overlay = showDialog("OneLake catalog", h("div", { class: "catalog" },
+    h("div", { class: "catalog-top" }, h("span", { class: "text" }, "Choose a lakehouse. The notebook reads its files and writes tables to it through OneLake."), search),
+    h("div", { class: "catalog-body" }, nav, h("section", { class: "catalog-main" }, head, list), detail),
+    h("div", { class: "dialog-actions catalog-foot" }, newBtn, h("span", { style: "flex:1" }), note,
+      btn("Cancel", null, closeDialog, "tool outline"), attachBtn)));
+  overlay.querySelector(".dialog").classList.add("wide");
+  search.focus();
+  detail.replaceChildren(h("p", { class: "muted-text" }, "Select a lakehouse to see its tables and files."));
+
+  rpc("meta_project").then((p) => (p.layers || []).forEach((l) => { pick.layers[l.lakehouse] = l.name; draw(); })).catch(() => {});
+  const catalog = await attempt(() => rpc("catalog"), "Could not list lakehouses");
+  if (!catalog || !overlay.isConnected) return;
+  pick.catalog = catalog;
+  state.workspaces = catalog.workspaces;
+  const attached = state.notebook?.lakehouse;
+  draw();
+  if (attached) {
+    const r = catalog.items.find((i) => i.lakehouse_id === attached.lakehouse_id);
+    if (r) select(r, null);
+    draw();
+  }
+  // The sidecar scans in the background; ask again until it is done.
+  for (let i = 0; i < 60 && !(state.endorsements && !state.endorsements.pending) && overlay.isConnected; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 2000));
+    state.endorsements = await rpc("endorsements", { workspace_ids: catalog.workspaces.map((w) => w.id) })
+      .catch((err) => ({ pending: false, available: false, items: {}, reason: String(err) }));
+  }
+  if (state.endorsements?.pending) state.endorsements = null;
+  if (overlay.isConnected) draw();
 }
 
 function attachLakehouse(ref) {
