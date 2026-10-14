@@ -80,7 +80,7 @@ def test_notebook_reads_local_files_and_writes_tables(tmp_path, monkeypatch):
     )
     out = service.run_cell(code, LH)
     assert out["status"] == "ok", out
-    assert out["outputs"] == [{"type": "text", "text": "Wrote 3 rows to dbo.sales_by_region (Delta version 0)"}]
+    assert out["outputs"] == [{"type": "text", "text": "Wrote 3 rows to dbo.sales_by_region (Delta version 0). New table: refresh the lakehouse in Fabric if it shows under Unidentified"}]
     assert service.history()[0]["rows"] == 3
 
 
