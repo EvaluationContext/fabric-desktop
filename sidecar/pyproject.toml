@@ -14,6 +14,8 @@ dependencies = [
     "deltalake>=0.25",
     "msal>=1.28",
     "requests>=2.31",
+    # Windows has no system time zone database; pyarrow needs one to show timestamps with a time zone.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
