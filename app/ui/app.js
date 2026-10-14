@@ -408,7 +408,7 @@ async function renderWorkspaces() {
       const r = { workspace_id: ws.id, item_id: it.id, type: it.type, name: it.displayName };
       const lh = it.type === "Lakehouse" ? lakehouseRef(ws, it) : null;
       return h("tr", {},
-        h("td", {}, h("span", { class: "item" }, lh ? icon("lakehouse", 18) : h("span", { class: "icon-gap" }),
+        h("td", {}, h("span", { class: "item" }, itemIcon(it.type),
           h("button", { class: "name-link", title: "Open in Fabric", onclick: () => openInFabric(fabricItemLink(r)) }, it.displayName))),
         h("td", { class: "ws-type" }, typeLabel(it.type)),
         h("td", { class: "actions" },
@@ -485,7 +485,7 @@ async function renderWorkspace() {
   body.replaceWith(shown.length ? h("table", { class: "list" },
     h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, ""))),
     h("tbody", {}, shown.map((lh) => h("tr", { class: "click", onclick: () => openLakehouse(lakehouseRef(ws, lh)) },
-      h("td", {}, h("span", { class: "item" }, icon("lakehouse", 18), lh.displayName)),
+      h("td", {}, h("span", { class: "item" }, itemIcon("Lakehouse"), lh.displayName)),
       h("td", {}, "Lakehouse"),
       h("td", {}, btn("Open in notebook", "notebook", (e) => { e.stopPropagation(); newNotebook(lakehouseRef(ws, lh)); }, "tool small link")))))) :
     h("p", { class: "muted-text" }, "No lakehouses in this workspace yet."));
@@ -497,6 +497,29 @@ async function renderWorkspace() {
 function typeLabel(type) {
   const words = String(type).replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").replace(/([a-z])([A-Z])/g, "$1 $2").split(" ");
   return words.map((w, i) => (i && w !== w.toUpperCase() ? w.toLowerCase() : w)).join(" ");
+}
+
+// An icon for each Fabric item type, tinted by workload the way the Fabric portal groups them.
+// Fluent UI icons, not Fabric's own artwork; other types get a plain document.
+const ITEM_ICONS = {
+  Lakehouse: ["lakehouse", "eng"], Notebook: ["notebook", "eng"], SparkJobDefinition: ["code", "eng"], Environment: ["boxToolbox", "eng"],
+  Warehouse: ["building", "wh"], WarehouseSnapshot: ["camera", "wh"], SQLEndpoint: ["databaseSearch", "wh"], SQLDatabase: ["database", "wh"],
+  Datamart: ["windowDatabase", "wh"], MirroredDatabase: ["databaseArrowRight", "wh"], MirroredWarehouse: ["databaseArrowRight", "wh"],
+  MirroredAzureDatabricksCatalog: ["databaseArrowRight", "wh"],
+  DataPipeline: ["flow", "fac"], Dataflow: ["dataFunnel", "fac"], CopyJob: ["copyArrowRight", "fac"], DataBuildToolJob: ["buildingFactory", "fac"],
+  Report: ["dataBarVertical", "bi"], PaginatedReport: ["documentTable", "bi"], SemanticModel: ["cube", "bi"], Dashboard: ["gauge", "bi"],
+  OrgApp: ["apps", "bi"], App: ["apps", "bi"],
+  Eventhouse: ["tableLightning", "rti"], KQLDatabase: ["database", "rti"], KQLQueryset: ["databaseSearch", "rti"], KQLDashboard: ["gauge", "rti"],
+  Eventstream: ["flashFlow", "rti"], Reflex: ["flash", "rti"],
+  MLModel: ["brainCircuit", "ds"], MLExperiment: ["beaker", "ds"], DataAgent: ["bot", "ds"],
+  UserDataFunction: ["braces", "eng"], GraphQLApi: ["plugConnected", "eng"],
+};
+
+function itemIcon(type, size = 18) {
+  const [name, family] = ITEM_ICONS[type] || ["document", "other"];
+  const svg = icon(name, size);
+  svg.classList.add("type-icon", `wl-${family}`);
+  return svg;
 }
 
 // Paths of item pages in the Fabric portal, by item type; other types open their workspace.
@@ -635,7 +658,7 @@ async function renderOneLake() {
           onclick: () => { open ? cp.open.delete(key(r)) : cp.open.add(key(r)); draw(); } }, open ? "▾" : "▸") : ""),
         h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
           "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (ev) => toggleFavorite(r, ev) }, fav ? "★" : "☆")),
-        h("td", {}, h("span", { class: "item" }, isLh ? icon("lakehouse", 18) : null,
+        h("td", {}, h("span", { class: "item" }, itemIcon(r.type),
           h("button", { class: "name-link", title: "Open in Fabric", onclick: () => showInFabric(fabricItemLink(r)) }, r.name))),
         h("td", {}, typeLabel(r.type)),
         h("td", {}, h("button", { class: "name-link", title: "Open the workspace in Fabric",
@@ -1264,7 +1287,7 @@ async function openDataItems() {
         return h("tr", { class: `click${pick.selected && key(pick.selected) === key(r) ? " selected" : ""}`, onclick: (e) => select(r, e.currentTarget), ondblclick: () => attachLakehouse(r) },
           h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
             "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (e) => toggleFavorite(r, e) }, fav ? "★" : "☆")),
-          h("td", {}, h("span", { class: "item" }, icon("lakehouse", 18), r.name)),
+          h("td", {}, h("span", { class: "item" }, itemIcon("Lakehouse"), r.name)),
           h("td", {}, r.workspace_name),
           h("td", {}, endorsementPill(r)),
           h("td", {}, pick.layers[r.name] || ""),
