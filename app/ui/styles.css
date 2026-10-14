@@ -226,6 +226,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .list tr.click:hover td { background: #fafafa; }
 .list .item { display: flex; align-items: center; gap: 10px; }
 .list .item .icon { color: var(--accent); }
+.name-link { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.name-link:hover, .name-link:focus-visible { color: var(--accent); text-decoration: underline; }
+.list .item .name-link { color: var(--accent); font-weight: 600; }
 .callout { display: flex; align-items: center; gap: 12px; padding: 14px 16px; margin-bottom: 20px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-dark); }
 .callout .spacer { flex: 1; }
 .muted-text { color: var(--muted); font-size: 13px; }
