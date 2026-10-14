@@ -18,7 +18,7 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 | --- | --- |
 | `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake I/O, notebook kernel, SQL engine, metadata framework, job runner and the JSON-lines server |
 | `app/` | Tauri 2 shell (`src-tauri/`) and the Fabric-style UI (`ui/`, plain HTML and JavaScript). The shell starts the sidecar and forwards UI actions to it |
-| `docs/` | Architecture overview and diagram |
+| `docs/` | Architecture overview and diagram, and the KratosBI logo files (`docs/brand/`) |
 | `examples/` | Sample jobs (`sales_by_region.toml` for DuckDB, `top_products.toml` for Polars) and sample data |
 
 ## One-time setup: Entra app registration
@@ -91,7 +91,7 @@ lakehouse.write_table(by_region, "dbo.sales_by_region")  # Delta table written s
 
 **Monitor** has two halves. The top lists what ran on this PC: metadata runs in Dev and notebook table writes, newest first. The bottom is Fabric's own Monitoring hub, the live page from the Fabric service shown in a second webview inside the app window, so Fabric Desktop adds no monitoring code of its own there. That view signs in with your Windows account when it is the same work account you use in the app, so there is no password prompt. It opens in the tenant of your app sign-in, which skips Fabric's email page. If Windows is signed in with another account, Fabric asks you to sign in once. The app saves that sign-in's cookies, encrypted for your Windows account (DPAPI), in `%LOCALAPPDATA%\FabricDesktop\fabric-view-signin.bin` and restores them on the next launch, so you don't sign in again each time. Delete that file to forget the sign-in. Links that leave Fabric open in your default browser.
 
-Icons are [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT).
+Fabric Desktop is by [KratosBI](https://kratosbi.com). The KratosBI logo and app icon in `docs/brand/` and `app/ui/` belong to KratosBI. Interface icons are [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) (MIT).
 
 ## Metadata framework
 

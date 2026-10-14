@@ -9,12 +9,26 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "Fabric Desktop", "width": 1440, "height": 900, "minWidth": 960, "minHeight": 600 }
+      {
+        "label": "main",
+        "title": "Fabric Desktop by KratosBI",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 600
+      }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "publisher": "KratosBI",
+    "copyright": "Copyright KratosBI"
   }
 }
