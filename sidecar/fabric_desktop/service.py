@@ -190,6 +190,33 @@ class Service(MetaMixin):
         self.favorites_file.write_text(json.dumps(sorted(favorites)))
         return sorted(favorites)
 
+    def list_items(self, workspace_id: str) -> list[dict[str, Any]]:
+        return self.fabric.list_items(workspace_id)
+
+    @property
+    def workspace_marks_file(self) -> Path:
+        return self.root / "workspaces.json"
+
+    def workspace_marks(self) -> dict[str, list[str]]:
+        """Workspace ids starred as favorites and pinned to the top, kept on this PC.
+
+        Pins keep the order they were pinned in."""
+        try:
+            marks = json.loads(self.workspace_marks_file.read_text())
+        except (OSError, ValueError):
+            marks = {}
+        return {"favorites": list(marks.get("favorites", [])), "pins": list(marks.get("pins", []))}
+
+    def set_workspace_mark(self, workspace_id: str, mark: str, on: bool) -> dict[str, list[str]]:
+        if mark not in ("favorites", "pins"):
+            raise ValueError(f"unknown workspace mark {mark!r}")
+        marks = self.workspace_marks()
+        ids = [i for i in marks[mark] if i != workspace_id]
+        marks[mark] = ids + [workspace_id] if on else ids
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.workspace_marks_file.write_text(json.dumps(marks))
+        return marks
+
     def create_lakehouse(self, workspace_id: str, name: str) -> dict[str, Any]:
         return self.fabric.create_lakehouse(workspace_id, name)
 

@@ -363,19 +363,107 @@ new MutationObserver(placeFabricView).observe(document.getElementById("dialog-ro
 
 // ---------- Workspaces, OneLake, lakehouse ----------
 
+// Favorites and pins are kept on this PC; pins sit at the top in the order they were pinned.
+const workspacesPage = { marks: null, filter: "all", open: new Set(), items: {} };
+
 async function renderWorkspaces() {
-  const body = h("div", { class: "muted-text" }, state.user ? "Loading workspaces..." : "");
+  const wp = workspacesPage;
+  const body = h("div", {}, h("p", { class: "muted-text" }, state.user ? "Loading workspaces..." : ""));
+  const chips = h("div", { class: "ws-filters" });
   setView(h("div", { class: "page" }, h("h1", {}, "Workspaces"),
-    h("p", { class: "sub" }, "Your Fabric workspaces."), signInCallout(), body));
+    h("p", { class: "sub" }, "Your Fabric workspaces. Expand one to see its items, star your favorites and pin the ones you use most."),
+    signInCallout(), chips, body));
   if (!state.user) return;
-  const workspaces = await loadWorkspaces();
+  const [workspaces, marks] = await Promise.all([loadWorkspaces(),
+    wp.marks ? wp.marks : rpc("workspace_marks").catch(() => ({ favorites: [], pins: [] }))]);
   if (state.view !== "workspaces") return;
-  const shown = workspaces.filter((w) => matches(w.displayName));
-  body.replaceWith(h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"))),
-    h("tbody", {}, shown.map((w) => h("tr", { class: "click", onclick: () => openWorkspace(w) },
-      h("td", {}, h("span", { class: "item" }, icon("workspace", 18), w.displayName)),
-      h("td", {}, w.type || "Workspace"))))));
+  wp.marks = marks;
+  const here = () => state.view === "workspaces";
+
+  async function mark(ws, which, e) {
+    e.stopPropagation();
+    const on = !wp.marks[which].includes(ws.id);
+    const result = await attempt(() => rpc("set_workspace_mark", { workspace_id: ws.id, mark: which, on }), "Could not save the workspace");
+    if (result) { wp.marks = result; draw(); }
+  }
+
+  async function toggle(ws, e) {
+    e.stopPropagation();
+    if (wp.open.has(ws.id)) { wp.open.delete(ws.id); draw(); return; }
+    wp.open.add(ws.id);
+    draw();
+    if (!wp.items[ws.id]) {
+      const items = await attempt(() => rpc("list_items", { workspace_id: ws.id }), `Could not list the items in ${ws.displayName}`);
+      wp.items[ws.id] = items || [];
+      if (here()) draw();
+    }
+  }
+
+  function itemRows(ws) {
+    const items = wp.items[ws.id];
+    if (!items) return h("p", { class: "muted-text ws-items-note" }, "Loading items...");
+    if (!items.length) return h("p", { class: "muted-text ws-items-note" }, "This workspace has no items yet.");
+    const sorted = [...items].sort((a, b) => typeLabel(a.type).localeCompare(typeLabel(b.type)) || a.displayName.localeCompare(b.displayName));
+    return h("table", { class: "list ws-items" }, h("tbody", {}, sorted.map((it) => {
+      const r = { workspace_id: ws.id, item_id: it.id, type: it.type, name: it.displayName };
+      const lh = it.type === "Lakehouse" ? lakehouseRef(ws, it) : null;
+      return h("tr", {},
+        h("td", {}, h("span", { class: "item" }, lh ? icon("lakehouse", 18) : h("span", { class: "icon-gap" }),
+          h("button", { class: "name-link", title: "Open in Fabric", onclick: () => openInFabric(fabricItemLink(r)) }, it.displayName))),
+        h("td", { class: "ws-type" }, typeLabel(it.type)),
+        h("td", { class: "actions" },
+          lh ? btn("Open", null, () => openLakehouse(lh), "tool small link") : null,
+          lh ? btn("SQL query", null, () => openSqlQuery(lh), "tool small link") : null,
+          btn("Open in Fabric", "open", () => openInFabric(fabricItemLink(r)), "tool small link")));
+    })));
+  }
+
+  function draw() {
+    if (!here()) return;
+    const { favorites, pins } = wp.marks;
+    const chip = (key, label, n) => h("button", { class: `chip${wp.filter === key ? " on" : ""}`,
+      onclick: () => { wp.filter = key; draw(); } }, `${label} ${n}`);
+    const byId = new Map(workspaces.map((w) => [w.id, w]));
+    const count = (ids) => ids.filter((id) => byId.has(id)).length;
+    chips.replaceChildren(chip("all", "All", workspaces.length), chip("favorites", "Favorites", count(favorites)),
+      chip("pins", "Pinned", count(pins)));
+    const pinned = pins.map((id) => byId.get(id)).filter(Boolean);
+    const ordered = [...pinned, ...workspaces.filter((w) => !pins.includes(w.id))];
+    const shown = ordered.filter((w) => matches(w.displayName) && (wp.filter === "all" || wp.marks[wp.filter].includes(w.id)));
+    const rows = [];
+    shown.forEach((w, i) => {
+      const open = wp.open.has(w.id);
+      const pin = pins.includes(w.id);
+      const fav = favorites.includes(w.id);
+      const lastPin = pin && !pins.includes(shown[i + 1]?.id);
+      rows.push(h("tr", { class: `click${lastPin && i < shown.length - 1 ? " last-pin" : ""}`, onclick: () => openWorkspace(w) },
+        h("td", {}, h("button", { class: "star", title: open ? "Hide items" : "Show items", "aria-label": open ? "Hide items" : "Show items",
+          "aria-expanded": String(open), onclick: (e) => toggle(w, e) }, open ? "−" : "+")),
+        h("td", {}, h("button", { class: `star pin${pin ? " on" : ""}`, title: pin ? "Unpin" : "Pin to the top",
+          "aria-label": pin ? "Unpin" : "Pin to the top", onclick: (e) => mark(w, "pins", e) }, icon(pin ? "pinFilled" : "pin", 16))),
+        h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
+          "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (e) => mark(w, "favorites", e) }, fav ? "★" : "☆")),
+        h("td", {}, h("span", { class: "item" }, icon("workspace", 18), w.displayName)),
+        h("td", {}, w.type || "Workspace"),
+        h("td", { class: "actions" }, btn("Open in Fabric", "open", (e) => { e.stopPropagation(); openInFabric(fabricItemLink({ workspace_id: w.id })); }, "tool small link"))));
+      if (open) rows.push(h("tr", { class: "sub-row" }, h("td", {}), h("td", { colspan: 5 }, itemRows(w))));
+    });
+    const table = shown.length ? h("table", { class: "list ws-list" },
+      h("thead", {}, h("tr", {}, h("th", { style: "width:32px" }), h("th", { style: "width:32px" }), h("th", { style: "width:32px" }),
+        h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}))),
+      h("tbody", {}, rows)) : h("p", { class: "muted-text", style: "padding:16px 0" },
+      wp.filter === "favorites" ? "No favorite workspaces yet. Click the star next to one." :
+      wp.filter === "pins" ? "No pinned workspaces yet. Click the pin next to one." : "Nothing matches.");
+    body.replaceChildren(table);
+  }
+  draw();
+}
+
+// Shows a Fabric page in the OneLake page's Fabric view.
+function openInFabric(url) {
+  fabricView.owner = "onelake";
+  fabricView.page = url;
+  go("onelake");
 }
 
 function openWorkspace(ws) {

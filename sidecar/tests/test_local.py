@@ -147,3 +147,18 @@ def test_catalog_lists_lakehouses_across_workspaces_and_keeps_favorites(tmp_path
     assert svc.set_favorite("lh1", False) == []
     end = svc.endorsements(["w1"])
     assert end["available"] is False and end["pending"] is False and "admin" in end["reason"]
+
+
+def test_workspace_marks_keep_favorites_and_pin_order(tmp_path):
+    from fabric_desktop.service import Service
+
+    svc = Service(client_id="x", root=tmp_path)
+    assert svc.workspace_marks() == {"favorites": [], "pins": []}
+    svc.set_workspace_mark("w2", "pins", True)
+    svc.set_workspace_mark("w1", "pins", True)
+    svc.set_workspace_mark("w1", "favorites", True)
+    assert Service(client_id="x", root=tmp_path).workspace_marks() == {"favorites": ["w1"], "pins": ["w2", "w1"]}
+    assert svc.set_workspace_mark("w2", "pins", False)["pins"] == ["w1"]
+    import pytest
+    with pytest.raises(ValueError):
+        svc.set_workspace_mark("w1", "bogus", True)
