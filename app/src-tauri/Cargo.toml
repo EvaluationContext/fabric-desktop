@@ -12,7 +12,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["unstable"] }
 serde_json = "1"
 
-# The Fabric view's own WebView2 environment, which can sign in with the Windows account.
+# The Fabric view's own WebView2 environment, which can sign in with the Windows account,
+# and DPAPI, which encrypts its saved sign-in.
 [target."cfg(windows)".dependencies]
 webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

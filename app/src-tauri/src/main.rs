@@ -244,18 +244,25 @@ async fn update_app(app: tauri::AppHandle, commit: String) -> Result<(), String>
     Ok(())
 }
 
-// ---- Fabric's own Monitoring hub, shown in a second webview docked into the Monitor page.
-// Fabric pages refuse to load in an iframe, but a separate webview is a browser of its own.
+// ---- Fabric's own pages (the Monitoring hub, the OneLake catalog), shown in one second webview
+// docked into the page. Fabric pages refuse to load in an iframe, but a separate webview is a
+// browser of its own. Both pages share this one view, so they share one Fabric sign-in.
 
 const FABRIC_VIEW: &str = "fabric";
 const FABRIC_MONITOR: &str = "https://app.fabric.microsoft.com/monitoringhub?experience=fabric-developer";
+const FABRIC_CATALOG: &str = "https://app.fabric.microsoft.com/onelake/explore?experience=fabric-developer";
+
+/// Hosts of the sign-in and of Fabric's own pages.
+const FABRIC_HOSTS: [&str; 6] = ["microsoft.com", "microsoftonline.com", "powerbi.com", "live.com", "msauth.net", "msftauth.net"];
+
+fn fabric_host(host: &str) -> bool {
+    let host = host.trim_start_matches('.');
+    FABRIC_HOSTS.iter().any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
 
 /// Sign-in and Fabric's own pages stay in the view; any other link opens in the default browser.
 fn stays_in_view(url: &Url) -> bool {
-    let host = url.host_str().unwrap_or_default();
-    ["microsoft.com", "microsoftonline.com", "powerbi.com", "live.com", "msauth.net", "msftauth.net"]
-        .iter()
-        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+    fabric_host(url.host_str().unwrap_or_default())
 }
 
 fn open_in_browser(url: &Url) -> Result<(), String> {
@@ -275,6 +282,29 @@ fn open_in_browser(url: &Url) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| format!("Could not open the browser: {e}"))
 }
 
+/// The page the Fabric view shows: "monitor", "catalog", or an https link to a Fabric item.
+fn fabric_page(page: &str, tenant: Option<&str>) -> Result<Url, String> {
+    let mut url = match page {
+        "monitor" => Url::parse(FABRIC_MONITOR),
+        "catalog" => Url::parse(FABRIC_CATALOG),
+        link => Url::parse(link),
+    }
+    .map_err(|e| e.to_string())?;
+    if url.scheme() != "https" || url.host_str() != Some("app.fabric.microsoft.com") {
+        return Err(format!("Not a Fabric page: {page}"));
+    }
+    // With the tenant of the account signed in to the app, Fabric skips its
+    // "Enter your work or school email" page and goes straight to that directory's sign-in.
+    if let Some(tenant) = tenant.filter(|t| t.len() == 36 && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')) {
+        url.query_pairs_mut().append_pair("ctid", tenant).append_pair("noSignUpCheck", "1");
+    }
+    Ok(url)
+}
+
+/// Which page the Fabric view was last sent to, so switching between Monitor and OneLake
+/// navigates only when the page changes.
+static FABRIC_SHOWN: Mutex<String> = Mutex::new(String::new());
+
 /// Shows the Fabric view over the page's placeholder, creating it the first time.
 /// Coordinates are CSS pixels inside the window, which are Tauri's logical pixels.
 #[tauri::command]
@@ -285,24 +315,32 @@ async fn fabric_view_show(
     width: f64,
     height: f64,
     tenant: Option<String>,
+    page: Option<String>,
 ) -> Result<(), String> {
+    let page = page.unwrap_or_else(|| "monitor".into());
+    let target = fabric_page(&page, tenant.as_deref())?;
     let position = LogicalPosition::new(x, y);
     let size = LogicalSize::new(width.max(1.0), height.max(1.0));
     if let Some(view) = app.get_webview(FABRIC_VIEW) {
         view.set_position(position).map_err(|e| e.to_string())?;
         view.set_size(size).map_err(|e| e.to_string())?;
+        let changed = { let mut shown = FABRIC_SHOWN.lock().unwrap(); std::mem::replace(&mut *shown, page.clone()) != page };
+        if changed {
+            view.navigate(target).map_err(|e| e.to_string())?;
+        }
         return view.show().map_err(|e| e.to_string());
     }
     let window = app.get_window("main").ok_or("The main window is not open")?;
-    let builder = WebviewBuilder::new(FABRIC_VIEW, WebviewUrl::External(fabric_home(tenant.as_deref())?))
-        .on_new_window(|url, _| {
-            if stays_in_view(&url) {
-                NewWindowResponse::Allow
-            } else {
-                let _ = open_in_browser(&url);
-                NewWindowResponse::Deny
-            }
-        });
+    // Start blank: the saved sign-in goes in before the first Fabric request.
+    let blank = Url::parse("about:blank").map_err(|e| e.to_string())?;
+    let builder = WebviewBuilder::new(FABRIC_VIEW, WebviewUrl::External(blank)).on_new_window(|url, _| {
+        if stays_in_view(&url) {
+            NewWindowResponse::Allow
+        } else {
+            let _ = open_in_browser(&url);
+            NewWindowResponse::Deny
+        }
+    });
     #[cfg(windows)]
     let builder = match sso::environment(&app) {
         Ok(environment) => builder.with_environment(environment),
@@ -311,17 +349,196 @@ async fn fabric_view_show(
             builder
         }
     };
-    window.add_child(builder, position, size).map(|_| ()).map_err(|e| e.to_string())
+    let view = window.add_child(builder, position, size).map_err(|e| e.to_string())?;
+    for cookie in signin::load() {
+        let _ = view.set_cookie(cookie);
+    }
+    *FABRIC_SHOWN.lock().unwrap() = page;
+    view.navigate(target).map_err(|e| e.to_string())?;
+    signin::keep_saving(app.clone());
+    Ok(())
 }
 
-/// The Monitoring hub URL. With the tenant of the account signed in to the app, Fabric skips
-/// its "Enter your work or school email" page and goes straight to that directory's sign-in.
-fn fabric_home(tenant: Option<&str>) -> Result<Url, String> {
-    let mut url = Url::parse(FABRIC_MONITOR).map_err(|e| e.to_string())?;
-    if let Some(tenant) = tenant.filter(|t| t.len() == 36 && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')) {
-        url.query_pairs_mut().append_pair("ctid", tenant).append_pair("noSignUpCheck", "1");
+/// Keeps the Fabric view's sign-in between launches. Microsoft's sign-in cookies are usually
+/// session cookies, which WebView2 drops when the app closes, so every launch asked to sign
+/// in again. The app saves them every few seconds, encrypted for this Windows user with DPAPI
+/// (as Edge and Chrome protect their own cookies), and puts them back when the view opens.
+mod signin {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use serde_json::{json, Value};
+    use tauri::webview::cookie::{time::OffsetDateTime, Cookie, Expiration, SameSite};
+    use tauri::Manager;
+
+    fn file() -> PathBuf {
+        super::data_dir().join("fabric-view-signin.bin")
     }
-    Ok(url)
+
+    /// Serialises the sign-in and Fabric cookies; other sites' cookies are left out.
+    pub fn encode(cookies: &[Cookie<'_>]) -> Vec<u8> {
+        let list: Vec<Value> = cookies
+            .iter()
+            .filter(|c| c.domain().is_some_and(super::fabric_host))
+            .map(|c| {
+                json!({
+                    "name": c.name(), "value": c.value(), "domain": c.domain(), "path": c.path(),
+                    "secure": c.secure().unwrap_or(false), "http_only": c.http_only().unwrap_or(false),
+                    "same_site": match c.same_site() { Some(SameSite::Strict) => "strict", Some(SameSite::Lax) => "lax", _ => "none" },
+                    "expires": c.expires_datetime().map(|t| t.unix_timestamp()),
+                })
+            })
+            .collect();
+        serde_json::to_vec(&list).unwrap_or_default()
+    }
+
+    /// The saved cookies that have not expired. Session cookies come back as session cookies.
+    pub fn decode(bytes: &[u8], now: i64) -> Vec<Cookie<'static>> {
+        let list: Vec<Value> = serde_json::from_slice(bytes).unwrap_or_default();
+        list.iter()
+            .filter_map(|c| {
+                let text = |k: &str| c.get(k).and_then(Value::as_str).map(str::to_owned);
+                let expires = c.get("expires").and_then(Value::as_i64);
+                if expires.is_some_and(|t| t <= now) {
+                    return None;
+                }
+                let mut cookie = Cookie::build((text("name")?, text("value")?))
+                    .domain(text("domain")?)
+                    .path(text("path").unwrap_or_else(|| "/".into()))
+                    .secure(c.get("secure").and_then(Value::as_bool).unwrap_or(false))
+                    .http_only(c.get("http_only").and_then(Value::as_bool).unwrap_or(false))
+                    .same_site(match c.get("same_site").and_then(Value::as_str) {
+                        Some("strict") => SameSite::Strict,
+                        Some("lax") => SameSite::Lax,
+                        _ => SameSite::None,
+                    })
+                    .build();
+                cookie.set_expires(match expires.and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok()) {
+                    Some(t) => Expiration::DateTime(t),
+                    None => Expiration::Session,
+                });
+                Some(cookie)
+            })
+            .collect()
+    }
+
+    pub fn load() -> Vec<Cookie<'static>> {
+        let Ok(sealed) = std::fs::read(file()) else { return Vec::new() };
+        match dpapi::unprotect(&sealed) {
+            Ok(bytes) => decode(&bytes, OffsetDateTime::now_utc().unix_timestamp()),
+            Err(e) => {
+                eprintln!("Fabric view: could not read the saved sign-in ({e})");
+                Vec::new()
+            }
+        }
+    }
+
+    static LAST: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    static STARTED: Mutex<bool> = Mutex::new(false);
+
+    fn save(cookies: &[Cookie<'_>]) {
+        let bytes = encode(cookies);
+        let mut last = LAST.lock().unwrap();
+        if *last == bytes {
+            return;
+        }
+        match dpapi::protect(&bytes) {
+            Ok(sealed) => {
+                let tmp = file().with_extension("tmp");
+                if std::fs::write(&tmp, sealed).and_then(|_| std::fs::rename(&tmp, file())).is_ok() {
+                    *last = bytes;
+                }
+            }
+            Err(e) => eprintln!("Fabric view: could not save the sign-in ({e})"),
+        }
+    }
+
+    /// Reads the view's cookies on a thread of its own: on Windows, reading them from a
+    /// command or an event handler deadlocks (WebView2 answers on the main thread).
+    pub fn keep_saving(app: tauri::AppHandle) {
+        let mut started = STARTED.lock().unwrap();
+        if *started || !dpapi::AVAILABLE {
+            return;
+        }
+        *started = true;
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if let Some(view) = app.get_webview(super::FABRIC_VIEW) {
+                if let Ok(cookies) = view.cookies() {
+                    save(&cookies);
+                }
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    mod dpapi {
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::Cryptography::{
+            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+        };
+
+        pub const AVAILABLE: bool = true;
+
+        fn run(data: &[u8], seal: bool) -> Result<Vec<u8>, String> {
+            let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+            let mut output = CRYPT_INTEGER_BLOB::default();
+            unsafe {
+                if seal {
+                    CryptProtectData(&input, windows::core::w!("Fabric Desktop sign-in"), None, None, None,
+                                     CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+                } else {
+                    CryptUnprotectData(&input, None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+                }
+                .map_err(|e| e.to_string())?;
+                let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+                LocalFree(Some(HLOCAL(output.pbData as _)));
+                Ok(bytes)
+            }
+        }
+
+        pub fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
+            run(data, true)
+        }
+
+        pub fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+            run(data, false)
+        }
+    }
+
+    /// Only Windows has DPAPI; elsewhere (development builds) nothing is saved.
+    #[cfg(not(windows))]
+    mod dpapi {
+        pub const AVAILABLE: bool = false;
+
+        pub fn protect(_: &[u8]) -> Result<Vec<u8>, String> {
+            Err("not supported on this platform".into())
+        }
+
+        pub fn unprotect(_: &[u8]) -> Result<Vec<u8>, String> {
+            Err("not supported on this platform".into())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn keeps_sign_in_cookies_and_drops_expired_and_foreign_ones() {
+            let session = Cookie::build(("ESTSAUTH", "abc")).domain("login.microsoftonline.com").path("/")
+                .secure(true).http_only(true).same_site(SameSite::None).build();
+            let mut expired = Cookie::build(("old", "1")).domain(".powerbi.com").path("/").build();
+            expired.set_expires(OffsetDateTime::from_unix_timestamp(100).unwrap());
+            let foreign = Cookie::build(("ad", "x")).domain("example.com").path("/").build();
+            let back = decode(&encode(&[session, expired, foreign]), 1_000);
+            assert_eq!(back.len(), 1);
+            assert_eq!((back[0].name(), back[0].value(), back[0].domain()), ("ESTSAUTH", "abc", Some("login.microsoftonline.com")));
+            assert_eq!(back[0].expires(), Some(Expiration::Session));
+            assert_eq!((back[0].http_only(), back[0].secure(), back[0].same_site()), (Some(true), Some(true), Some(SameSite::None)));
+        }
+    }
 }
 
 /// The Fabric view gets its own WebView2 environment that may sign in with the Windows account
@@ -387,14 +604,20 @@ async fn fabric_view_hide(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-/// back, reload, home, or browser (open the current page in the default browser).
+/// back, reload, home (the page's own start: page is "monitor" or "catalog"),
+/// or browser (open the current page in the default browser).
 #[tauri::command]
-async fn fabric_view_action(app: tauri::AppHandle, action: String) -> Result<(), String> {
+async fn fabric_view_action(app: tauri::AppHandle, action: String, page: Option<String>) -> Result<(), String> {
     let view = app.get_webview(FABRIC_VIEW).ok_or("The Fabric view is not open")?;
     match action.as_str() {
         "back" => view.eval("history.back()").map_err(|e| e.to_string()),
         "reload" => view.reload().map_err(|e| e.to_string()),
-        "home" => view.navigate(Url::parse(FABRIC_MONITOR).map_err(|e| e.to_string())?).map_err(|e| e.to_string()),
+        "home" => {
+            let page = page.unwrap_or_else(|| "monitor".into());
+            let url = fabric_page(&page, None)?;
+            *FABRIC_SHOWN.lock().unwrap() = page;
+            view.navigate(url).map_err(|e| e.to_string())
+        }
         "browser" => open_in_browser(&view.url().map_err(|e| e.to_string())?),
         _ => Err(format!("unknown action {action}")),
     }

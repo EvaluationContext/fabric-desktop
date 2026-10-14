@@ -110,6 +110,10 @@ class FabricClient:
                             found[item["id"]] = endorsement
         return found
 
+    def list_items(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Every item in the workspace: lakehouses, warehouses, notebooks, semantic models, ..."""
+        return self._paged(f"/workspaces/{workspace_id}/items")
+
     def get_lakehouse(self, workspace_id: str, lakehouse_id: str) -> dict[str, Any]:
         return self._request("GET", f"/workspaces/{workspace_id}/lakehouses/{lakehouse_id}").json()
 
