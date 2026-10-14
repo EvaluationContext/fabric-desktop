@@ -9,6 +9,7 @@ description = "Run data jobs on your own machine and publish Delta tables to Mic
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.1",
+    "sqlglot>=25",
     "polars>=1.0",
     "pyarrow>=16",
     "deltalake>=0.25",

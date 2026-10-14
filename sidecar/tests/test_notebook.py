@@ -177,3 +177,79 @@ def test_display_shows_timestamps_with_a_time_zone():
     from fabric_desktop.notebook import display
     table = pa.table({"ts": pa.array([dt.datetime(2024, 1, 1)], pa.timestamp("us", tz="UTC"))})
     assert display(table)["rows"] == [["2024-01-01 00:00:00+00:00"]]
+
+
+def _sql_service(tmp_path, monkeypatch, schemas=False):
+    """A service whose lakehouse tables are local Delta tables."""
+    import pyarrow as pa
+    tables = tmp_path / "tables"
+    write_deltalake(str(tables / "sales"), pa.table({
+        "Country": ["US", "US", "UK", "DE"], "SalesAmount": [10.0, 5.5, 3.0, float("nan")],
+        "OrderDate": pa.array([1, 2, 3, 4], pa.timestamp("us", "UTC"))}))
+    write_deltalake(str(tables / "regions"), pa.table({"Country": ["US", "UK"], "Region": ["Americas", "Europe"]}))
+    opened = []
+
+    def open_table(name):
+        opened.append(name)
+        ref = lakehouse.table_ref(name)
+        return DeltaTable(str(tables / ref.table))
+
+    monkeypatch.setattr(lakehouse, "open_table", open_table)
+    service = Service(client_id="x", root=tmp_path)
+    service._auth = type("Auth", (), {"storage_token": lambda self: "tok"})()
+    service._schema_cache = {LH["lakehouse_id"]: schemas}
+    return service, opened
+
+
+def test_sql_runs_spark_sql_over_lakehouse_tables(tmp_path, monkeypatch):
+    service, opened = _sql_service(tmp_path, monkeypatch)
+    out = service.run_sql("""
+        WITH t AS (SELECT `Country`, SalesAmount FROM dbo.sales WHERE date_format(OrderDate, 'yyyy') = '1970')
+        SELECT t.Country, r.Region, count(*) AS orders, nvl(sum(SalesAmount), 0) AS revenue
+        FROM t LEFT JOIN regions r ON r.Country = t.Country
+        GROUP BY t.Country, r.Region ORDER BY orders DESC, t.Country""", LH)
+    assert [c["name"] for c in out["columns"]] == ["Country", "Region", "orders", "revenue"]
+    assert out["rows"][0] == ["US", "Americas", 2, 15.5]
+    assert out["rows"][1] == ["DE", None, 1, "nan"]  # NaN is not valid JSON, so it comes back as text
+    assert out["row_count"] == 3
+    assert sorted(opened) == ["dbo.sales", "regions"]
+
+
+def test_sql_limits_rows_but_counts_all_and_keeps_repeated_names(tmp_path, monkeypatch):
+    service, _ = _sql_service(tmp_path, monkeypatch)
+    out = service.run_sql("SELECT Country, Country FROM sales;", LH, limit=2)
+    assert out["row_count"] == 4 and len(out["rows"]) == 2
+    assert out["rows"][0] == ["US", "US"]
+    assert isinstance(out["rows"][0][0], str)
+    ts = service.run_sql("SELECT OrderDate FROM sales LIMIT 1", LH)["rows"][0][0]
+    assert ts.startswith("1970-01-01")
+
+
+def test_sql_errors_are_plain(tmp_path, monkeypatch):
+    service, _ = _sql_service(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="empty"):
+        service.run_sql("  -- nothing here\n", LH)
+    with pytest.raises(ValueError, match="schema.table"):
+        service.run_sql("SELECT * FROM other_lh.dbo.sales", LH)
+
+
+def test_sql_result_saves_as_a_table_and_exports_csv(tmp_path, monkeypatch):
+    service, _ = _sql_service(tmp_path, monkeypatch)
+    written = {}
+
+    def local_publish(data, ref, mode, token):
+        written[ref.table] = data
+        path = tmp_path / "onelake" / ref.table
+        write_deltalake(str(path), data, mode=mode)
+        return DeltaTable(str(path))
+
+    monkeypatch.setattr(lakehouse, "publish", local_publish)
+    out = service.save_sql("SELECT Country, sum(SalesAmount) AS revenue FROM sales GROUP BY Country", LH, "sales_by_country")
+    assert out["rows"] == 3 and written["sales_by_country"].num_rows == 3
+    assert "refresh the lakehouse" in out["message"]
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    csv = service.export_sql_csv("SELECT * FROM regions ORDER BY Country", LH)
+    assert csv["rows"] == 2 and Path(csv["path"]).read_text().splitlines()[1] == '"UK","Europe"'
+    assert service.table_columns(LH, "regions") == [{"name": "Country", "type": "string"}, {"name": "Region", "type": "string"}]

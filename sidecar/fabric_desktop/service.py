@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import math
 import platform
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import pyarrow.csv as pa_csv
+
 from .auth import ADMIN_SCOPES, Authenticator
 from .fabric_api import FabricClient
-from . import lakehouse
+from . import lakehouse, sql
 from .jobs import Job, run_local
 from .meta_service import MetaMixin
 from .notebook import Kernel, NotebookStore, to_ipynb
@@ -217,12 +221,47 @@ class Service(MetaMixin):
     # every cell so a restarted sidecar picks it up again.
 
     def run_cell(self, code: str, lakehouse_ref: dict[str, str] | None = None) -> dict[str, Any]:
+        self._attach(lakehouse_ref)
+        return self.kernel.run(code)
+
+    def _attach(self, lakehouse_ref: dict[str, str] | None) -> None:
         lakehouse.attach(None if not lakehouse_ref else lakehouse.Attached(
             workspace_id=lakehouse_ref["workspace_id"], lakehouse_id=lakehouse_ref["lakehouse_id"],
             name=lakehouse_ref["name"], storage_token=lambda: self.auth.storage_token(),
             work_dir=self.root, history_file=self.history_file,
             schemas_enabled=lambda: self._schemas_enabled(lakehouse_ref["workspace_id"], lakehouse_ref["lakehouse_id"])))
-        return self.kernel.run(code)
+
+    # SQL query page: Spark SQL over one lakehouse's tables, run on this PC.
+
+    def run_sql(self, query: str, lakehouse_ref: dict[str, str], limit: int = 1000) -> dict[str, Any]:
+        self._attach(lakehouse_ref)
+        started = time.monotonic()
+        result = sql.run(query)
+        columns = [c.to_pylist() for c in result.slice(0, limit).columns]  # by position: names can repeat
+        return {"columns": [{"name": f.name, "type": str(f.type)} for f in result.schema],
+                "rows": [[_json_value(v) for v in row] for row in zip(*columns)],
+                "row_count": result.num_rows, "seconds": round(time.monotonic() - started, 2)}
+
+    def save_sql(self, query: str, lakehouse_ref: dict[str, str], table: str, mode: str = "overwrite") -> dict[str, Any]:
+        self._attach(lakehouse_ref)
+        written = lakehouse.write_table(sql.run(query), table, mode)
+        return {"table": written.table, "rows": written.rows, "message": repr(written)}
+
+    def export_sql_csv(self, query: str, lakehouse_ref: dict[str, str]) -> dict[str, Any]:
+        """Write the full result to the Downloads folder."""
+        self._attach(lakehouse_ref)
+        result = sql.run(query)
+        folder = Path.home() / "Downloads"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{lakehouse_ref['name']} query {time.strftime('%Y-%m-%d %H%M%S')}.csv"
+        pa_csv.write_csv(result, str(path))
+        return {"path": str(path), "rows": result.num_rows}
+
+    def table_columns(self, lakehouse_ref: dict[str, str], table: str) -> list[dict[str, str]]:
+        self._attach(lakehouse_ref)
+        # Delta's own type names (string, long, timestamp), as Fabric shows them.
+        return [{"name": f.name, "type": f.type.type if isinstance(f.type.type, str) else str(f.type)}
+                for f in lakehouse.open_table(table).schema().fields]
 
     def _schemas_enabled(self, workspace_id: str, lakehouse_id: str) -> bool:
         """Fabric reports a defaultSchema only for lakehouses created with schemas. Asked once per lakehouse."""
@@ -267,3 +306,12 @@ class Service(MetaMixin):
         ipynb = json.dumps(to_ipynb(cells, lakehouse_ref)).encode()
         item = self.fabric.save_notebook(lakehouse_ref["workspace_id"], name, ipynb)
         return {"name": name, "workspace_id": lakehouse_ref["workspace_id"], "id": item.get("id")}
+
+
+def _json_value(value: Any) -> Any:
+    """A cell value the UI can parse: JSON has no NaN, dates or decimals."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    return str(value)

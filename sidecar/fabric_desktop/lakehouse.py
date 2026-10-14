@@ -114,16 +114,25 @@ def read_json(path: str, **kwargs: Any) -> pl.DataFrame:
     return pl.read_json(local_path(path), **kwargs)
 
 
-def read_table(table: str) -> pl.DataFrame:
+def open_table(table: str) -> DeltaTable:
     ref = table_ref(table)
     opts = storage_options(_current().storage_token())
     try:
-        delta = DeltaTable(ref.uri, storage_options=opts)
+        return DeltaTable(ref.uri, storage_options=opts)
     except TableNotFoundError as e:
         folder = ref.uri.split("/Tables/", 1)[1]
         raise TableNotFoundError(f"No Delta table at Tables/{folder} in {_current().name}. "
                                  f"Check the name in the Explorer. ({e})") from None
-    return pl.from_arrow(delta.to_pyarrow_table())
+
+
+def read_table(table: str) -> pl.DataFrame:
+    return pl.from_arrow(open_table(table).to_pyarrow_table())
+
+
+def sql(query: str) -> pl.DataFrame:
+    """Run Spark SQL over the attached lakehouse's tables on this PC, e.g. ``sql("SELECT * FROM sales")``."""
+    from . import sql as engine
+    return pl.from_arrow(engine.run(query))
 
 
 def files(directory: str = "Files") -> list[str]:
