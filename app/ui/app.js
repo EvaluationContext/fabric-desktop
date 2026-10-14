@@ -414,8 +414,13 @@ function typeLabel(type) {
 // Paths of item pages in the Fabric portal, by item type; other types open their workspace.
 const FABRIC_ITEM_PATHS = {
   Lakehouse: "lakehouses", Warehouse: "datawarehouses", Notebook: "synapsenotebooks", SemanticModel: "datasets",
-  Report: "reports", DataPipeline: "pipelines", Dashboard: "dashboards", Eventhouse: "eventhouses", KQLDatabase: "databases",
+  Report: "reports", PaginatedReport: "rdlreports", DataPipeline: "pipelines", Dashboard: "dashboards", Eventhouse: "eventhouses", KQLDatabase: "databases",
 };
+
+function showInFabric(url) {
+  fabricView.page = url;
+  placeFabricView();
+}
 
 function fabricItemLink(r) {
   const path = FABRIC_ITEM_PATHS[r.type];
@@ -542,13 +547,15 @@ async function renderOneLake() {
           onclick: () => { open ? cp.open.delete(key(r)) : cp.open.add(key(r)); draw(); } }, open ? "▾" : "▸") : ""),
         h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
           "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (ev) => toggleFavorite(r, ev) }, fav ? "★" : "☆")),
-        h("td", {}, h("span", { class: "item" }, isLh ? icon("lakehouse", 18) : null, r.name)),
+        h("td", {}, h("span", { class: "item" }, isLh ? icon("lakehouse", 18) : null,
+          h("button", { class: "name-link", title: "Open in Fabric", onclick: () => showInFabric(fabricItemLink(r)) }, r.name))),
         h("td", {}, typeLabel(r.type)),
-        h("td", {}, r.workspace_name),
+        h("td", {}, h("button", { class: "name-link", title: "Open the workspace in Fabric",
+          onclick: () => showInFabric(fabricItemLink({ workspace_id: r.workspace_id })) }, r.workspace_name)),
         h("td", {}, e ? h("span", { class: `pill-s ${e === "Certified" ? "pass" : "info"}` }, e) : ""),
         h("td", {}, (isLh && cp.layers[r.name]) || ""),
         h("td", { class: "actions" },
-          btn("Show in Fabric", null, () => { fabricView.page = fabricItemLink(r); placeFabricView(); }, "tool small link"),
+          btn("Show in Fabric", null, () => showInFabric(fabricItemLink(r)), "tool small link"),
           isLh ? btn("SQL query", null, () => openSqlQuery(r), "tool small link") : null,
           isLh ? btn("Open in notebook", null, () => newNotebook(r), "tool small link") : null)));
       if (open) {
