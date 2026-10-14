@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import polars as pl
+import pyarrow as pa
 import pytest
 from deltalake import DeltaTable, write_deltalake
 
@@ -169,3 +170,10 @@ def test_schema_layout_comes_from_the_lakehouse_default_schema(tmp_path):
         assert service._schemas_enabled("ws1", "lh2") is False
     finally:
         service_mod.FabricClient = original
+
+
+def test_display_shows_timestamps_with_a_time_zone():
+    import datetime as dt
+    from fabric_desktop.notebook import display
+    table = pa.table({"ts": pa.array([dt.datetime(2024, 1, 1)], pa.timestamp("us", tz="UTC"))})
+    assert display(table)["rows"] == [["2024-01-01 00:00:00+00:00"]]
