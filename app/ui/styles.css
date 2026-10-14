@@ -437,3 +437,26 @@ h2.flush { margin: 0; }
 .sql-table-row .tree-row.chev { flex: none; padding-right: 2px; }
 .sql-table-row .tree-row:not(.chev) { flex: 1; min-width: 0; padding-left: 2px; }
 .tree-row.sql-col { padding-left: 52px; font-size: 12.5px; }
+
+/* Workspaces page */
+.ws-filters { display: flex; gap: 8px; margin: 4px 0 12px; }
+.ws-list tr.last-pin td { border-bottom: 2px solid var(--accent-soft); }
+.star.pin { display: inline-flex; color: #8a8a8a; }
+.star.pin.on { color: var(--accent); }
+.ws-list tr.sub-row td { background: #fafafa; }
+.ws-list td.actions, .ws-items td.actions { text-align: right; white-space: nowrap; }
+.ws-items { margin: 0; }
+.ws-items td { padding-top: 6px; padding-bottom: 6px; }
+.ws-items .ws-type { width: 200px; color: var(--muted, #616161); }
+.ws-items-note { margin: 8px 0; }
+.ws-list button[aria-expanded] { font-size: 18px; width: 24px; }
+
+/* Item type icons, tinted by Fabric workload */
+.list .item .type-icon { flex: none; }
+.list .item .type-icon.wl-eng { color: #0f7b6c; }
+.list .item .type-icon.wl-wh { color: #1b5fa8; }
+.list .item .type-icon.wl-fac { color: #2f7d32; }
+.list .item .type-icon.wl-bi { color: #a35400; }
+.list .item .type-icon.wl-rti { color: #8a3ffc; }
+.list .item .type-icon.wl-ds { color: #6b4fbb; }
+.list .item .type-icon.wl-other { color: var(--muted); }
