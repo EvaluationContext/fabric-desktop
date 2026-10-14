@@ -180,6 +180,12 @@ function renderChrome() {
       onclick: () => openWorkspace(state.openWorkspace),
     }, icon("workspace", 22), state.openWorkspace.displayName));
   }
+  if (sqlPage.ref) {
+    open.push(h("button", {
+      class: `rail-item${state.view === "query" ? " active" : ""}`,
+      onclick: () => go("query"),
+    }, icon("code", 22), "SQL query"));
+  }
   if (state.notebook) {
     open.push(h("button", {
       class: `rail-item${state.view === "notebook" ? " active" : ""}`,
@@ -197,6 +203,11 @@ function renderChrome() {
   } else if (state.view === "workspace" && state.openWorkspace) {
     crumbs.push(h("button", { class: "crumb", onclick: () => go("workspaces") }, "Workspaces"), h("span", {}, "/"),
       h("span", { class: "current" }, state.openWorkspace.displayName));
+  } else if (state.view === "query" && sqlPage.ref) {
+    const lh = sqlPage.ref;
+    crumbs.push(h("span", {}, lh.workspace_name || "Workspace"), h("span", {}, "/"),
+      h("button", { class: "crumb", onclick: () => openLakehouse(lh) }, lh.name), h("span", {}, "/"),
+      h("span", { class: "current" }, "SQL query"));
   } else if (state.view === "lakehouse" && state.lakehouseView) {
     const lh = state.lakehouseView;
     crumbs.push(h("button", { class: "crumb", onclick: () => openWorkspace({ id: lh.workspace_id, displayName: lh.workspace_name }) },
@@ -209,7 +220,7 @@ function render() {
   renderChrome();
   if (state.view !== fabricView.owner) placeFabricView();
   const views = { home: renderHome, create: renderCreate, workspaces: renderWorkspaces, workspace: renderWorkspace,
-    onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, notebook: renderNotebook, ...window.META_VIEWS };
+    onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, query: renderQuery, notebook: renderNotebook, ...window.META_VIEWS };
   (views[state.view] || renderHome)();
 }
 
@@ -538,6 +549,7 @@ async function renderOneLake() {
         h("td", {}, (isLh && cp.layers[r.name]) || ""),
         h("td", { class: "actions" },
           btn("Show in Fabric", null, () => { fabricView.page = fabricItemLink(r); placeFabricView(); }, "tool small link"),
+          isLh ? btn("SQL query", null, () => openSqlQuery(r), "tool small link") : null,
           isLh ? btn("Open in notebook", null, () => newNotebook(r), "tool small link") : null)));
       if (open) {
         const tree = h("div", { class: "explorer-content", style: "padding:0" });
@@ -587,9 +599,282 @@ function renderLakehouse() {
   setView(h("div", { class: "page" }, h("h1", {}, ref.name),
     h("p", { class: "sub" }, `Lakehouse in ${ref.workspace_name}`),
     h("div", { class: "toolbar", style: "padding:0;border:0;margin-bottom:16px" },
-      btn("Open in new notebook", "notebook", () => newNotebook(ref), "tool primary")),
+      btn("Open in new notebook", "notebook", () => newNotebook(ref), "tool primary"),
+      btn("New SQL query", "code", () => openSqlQuery(ref), "tool outline")),
     h("div", { style: "max-width:520px;background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px" }, tree)));
   renderTree(tree, ref, null);
+}
+
+// ---------- SQL query page ----------
+
+// Spark SQL over one lakehouse's tables, run on this PC by the sidecar (DuckDB).
+const QUERY_HINT = "-- Spark SQL runs on this PC. Press Ctrl+Enter to run.\n";
+const sqlPage = { ref: null, tabs: [], active: 0, tables: null, cols: {}, open: {} };
+
+function openSqlQuery(ref) {
+  if (sqlPage.ref?.lakehouse_id !== ref.lakehouse_id) {
+    Object.assign(sqlPage, { ref, tabs: loadQueryTabs(ref), active: 0, tables: null, cols: {}, open: {} });
+  }
+  go("query");
+}
+
+function queryTabsKey(ref) {
+  return `fabric-desktop.sql.${ref.lakehouse_id}`;
+}
+
+function loadQueryTabs(ref) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(queryTabsKey(ref)));
+    if (Array.isArray(saved) && saved.length) return saved.map((t) => ({ name: String(t.name), sql: String(t.sql) }));
+  } catch { /* no saved tabs */ }
+  return [{ name: "Query 1", sql: QUERY_HINT }];
+}
+
+function saveQueryTabs() {
+  try {
+    localStorage.setItem(queryTabsKey(sqlPage.ref), JSON.stringify(sqlPage.tabs.map((t) => ({ name: t.name, sql: t.sql }))));
+  } catch { /* storage unavailable: tabs last for this session */ }
+}
+
+// "dbo.sales" reads as "sales", the way Fabric's query tab names it.
+function sqlTableName(schema, table) {
+  const quote = (s) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s) ? s : `\`${s.replace(/`/g, "``")}\``);
+  return schema === "dbo" ? quote(table) : `${quote(schema)}.${quote(table)}`;
+}
+
+function cellText(v) {
+  if (v === null || v === undefined) return "NULL";
+  return typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 6 }) : String(v);
+}
+
+function renderQuery() {
+  const p = sqlPage;
+  const ref = p.ref;
+  if (!ref) return go("onelake");
+  if (!p.tabs[p.active]) p.active = 0;
+  const tab = p.tabs[p.active];
+  const here = () => state.view === "query" && p.ref === ref && p.tabs[p.active] === tab;
+
+  const editor = h("textarea", { class: "sql-editor", spellcheck: "false", "aria-label": "SQL query" });
+  editor.value = tab.sql;
+  const gutter = h("div", { class: "sql-gutter", "aria-hidden": "true" });
+  const syncGutter = () => {
+    const n = Math.max(editor.value.split("\n").length, 10);
+    gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n");
+    gutter.scrollTop = editor.scrollTop;
+  };
+  const setSql = (text) => { tab.sql = text; saveQueryTabs(); };
+  editor.addEventListener("input", () => { setSql(editor.value); syncGutter(); });
+  editor.addEventListener("scroll", () => { gutter.scrollTop = editor.scrollTop; });
+  editor.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); }
+    else if (e.key === "Tab" && !e.shiftKey) {
+      e.preventDefault();
+      editor.setRangeText("  ", editor.selectionStart, editor.selectionEnd, "end");
+      setSql(editor.value);
+    }
+  });
+  const chosenSql = () => {
+    const { selectionStart: a, selectionEnd: b } = editor;
+    return b > a ? editor.value.slice(a, b) : editor.value;
+  };
+  const insertAtCursor = (text) => {
+    editor.focus();
+    editor.setRangeText(text, editor.selectionStart, editor.selectionEnd, "end");
+    setSql(editor.value);
+    syncGutter();
+  };
+
+  async function run(query = chosenSql()) {
+    if (!query.trim() || tab.running) return;
+    tab.running = true;
+    tab.error = null;
+    drawResults();
+    try {
+      tab.result = await rpc("run_sql", { query, lakehouse_ref: ref });
+      tab.ranSql = query;
+    } catch (err) {
+      tab.result = null;
+      tab.error = String(err);
+    }
+    tab.running = false;
+    if (here()) drawResults();
+  }
+
+  async function saveAsTable() {
+    const query = chosenSql();
+    if (!query.trim()) return;
+    const name = await askText("Save as table", `Table name in ${ref.name}, written with the full query result`, "query_result", "Save");
+    if (!name) return;
+    toast(`Writing ${name}...`);
+    const out = await attempt(() => rpc("save_sql", { query, lakehouse_ref: ref, table: name }), "Could not save the table");
+    if (out) {
+      toast(out.message);
+      delete state.tree[treeKey(ref, "tables")];
+      p.tables = null;
+      if (here()) drawTables();
+    }
+  }
+
+  async function openInNotebook() {
+    const query = chosenSql().trim();
+    await newNotebook(ref);
+    if (!state.notebook) return;
+    const cell = state.notebook.cells[0];
+    cell.source += `\ndf = lakehouse.sql("""\n${query.replace(/"""/g, '\\"\\"\\"')}\n""")\ndf\n`;
+    markDirty();
+    renderNotebook();
+  }
+
+  async function downloadCsv() {
+    if (!tab.ranSql) return;
+    const out = await attempt(() => rpc("export_sql_csv", { query: tab.ranSql, lakehouse_ref: ref }), "Could not save the CSV");
+    if (out) toast(`Saved ${out.rows.toLocaleString()} rows to ${out.path}`);
+  }
+
+  async function copyRows() {
+    const r = tab.result;
+    if (!r) return;
+    const lines = [r.columns.map((c) => c.name), ...r.rows.map((row) => row.map((v) => (v === null ? "" : String(v))))];
+    await attempt(() => navigator.clipboard.writeText(lines.map((l) => l.join("\t")).join("\n")), "Could not copy");
+    toast(`Copied ${r.rows.length.toLocaleString()} rows`);
+  }
+
+  // Explorer: click a table to query it, a column to type its name.
+  const tablesBox = h("div", { class: "explorer-content" });
+  function queryTable(name) {
+    const text = `SELECT *\nFROM ${name}\nLIMIT 100;`;
+    if (!tab.sql.trim() || tab.sql === QUERY_HINT) {
+      setSql(text);
+      editor.value = text;
+      syncGutter();
+      run(text);
+    } else {
+      p.tabs.push({ name: nextTabName(), sql: text, autorun: true });
+      p.active = p.tabs.length - 1;
+      saveQueryTabs();
+      renderQuery();
+    }
+  }
+  async function toggleColumns(name) {
+    p.open[name] = !p.open[name];
+    if (p.open[name] && !p.cols[name]) {
+      drawTables();
+      p.cols[name] = (await attempt(() => rpc("table_columns", { lakehouse_ref: ref, table: name }), "Could not read the columns")) || null;
+      if (!p.cols[name]) p.open[name] = false;
+    }
+    if (state.view === "query" && p.ref === ref) drawTables();
+  }
+  function drawTables() {
+    if (!p.tables) {
+      tablesBox.replaceChildren(h("div", { class: "tree-row muted" }, "Loading tables..."));
+      return;
+    }
+    const rows = [];
+    for (const [schema, names] of Object.entries(p.tables)) {
+      const qualify = Object.keys(p.tables).length > 1 || schema !== "dbo";
+      if (qualify) rows.push(h("div", { class: "tree-row muted", style: "padding-left:6px" }, schema));
+      if (!names.length) rows.push(h("div", { class: "tree-row muted", style: "padding-left:28px" }, "No tables"));
+      for (const t of names) {
+        const name = sqlTableName(schema, t);
+        const open = !!p.open[name];
+        rows.push(h("div", { class: "sql-table-row" },
+          h("button", { class: "tree-row chev", "aria-label": open ? `Hide columns of ${t}` : `Show columns of ${t}`,
+            style: `padding-left:${qualify ? 22 : 6}px`, onclick: () => toggleColumns(name) }, chevron(open)),
+          h("button", { class: "tree-row", title: `Query ${name}`, onclick: () => queryTable(name) },
+            icon("table", 15), h("span", { class: "label" }, t))));
+        if (open) {
+          if (!p.cols[name]) rows.push(h("div", { class: "tree-row muted", style: "padding-left:52px" }, "Loading..."));
+          for (const c of p.cols[name] || []) {
+            rows.push(h("button", { class: "tree-row sql-col", title: `Insert ${c.name}`,
+              onclick: () => insertAtCursor(/^[A-Za-z_][A-Za-z0-9_]*$/.test(c.name) ? c.name : `\`${c.name}\``) },
+            h("span", { class: "label" }, c.name), h("span", { class: "hint" }, c.type)));
+          }
+        }
+      }
+    }
+    tablesBox.replaceChildren(...rows);
+  }
+
+  const band = h("div", { class: "sql-band" });
+  const grid = h("div", { class: "sql-grid" });
+  function drawResults() {
+    const r = tab.result;
+    const pill = tab.running ? ["busy", "Running"] : tab.error ? ["bad", "Failed"] : r ? ["ok", "Succeeded"] : ["", "Not run"];
+    let msg = "Press Run to see results";
+    if (tab.running) msg = "Running on this PC...";
+    else if (r) {
+      msg = `${r.row_count.toLocaleString()} row${r.row_count === 1 ? "" : "s"} · ${r.seconds} s on this PC`;
+      if (r.rows.length < r.row_count) msg += ` · showing the first ${r.rows.length.toLocaleString()}`;
+    }
+    band.replaceChildren(h("span", { style: "font-weight:600" }, "Results"),
+      h("span", { class: `sql-pill ${pill[0]}` }, pill[1]), h("span", { class: "muted-text" }, tab.error ? "" : msg),
+      h("span", { class: "spacer" }),
+      btn("Copy", null, copyRows, "tool small", { disabled: !r }),
+      btn("Download CSV", null, downloadCsv, "tool small", { disabled: !r }));
+    if (tab.error) {
+      grid.replaceChildren(h("div", { class: "output error" }, h("pre", {}, tab.error.replace(/^Error: /, ""))));
+    } else if (r && r.columns.length) {
+      grid.replaceChildren(h("table", {},
+        h("thead", {}, h("tr", {}, h("th", { class: "i" }), r.columns.map((c) => h("th", { title: c.type }, c.name)))),
+        h("tbody", {}, r.rows.map((row, i) => h("tr", {}, h("td", { class: "i" }, String(i + 1)),
+          row.map((v) => h("td", { class: `${typeof v === "number" ? "n" : ""}${v === null ? " null" : ""}` }, cellText(v))))))));
+    } else {
+      grid.replaceChildren(h("p", { class: "muted-text", style: "padding:12px 16px" },
+        r ? "The query ran and returned no columns." : "Tables are named as in Fabric, so SELECT * FROM sales works here too."));
+    }
+  }
+
+  const nextTabName = () => {
+    let n = p.tabs.length + 1;
+    while (p.tabs.some((t) => t.name === `Query ${n}`)) n++;
+    return `Query ${n}`;
+  };
+  const tabs = h("div", { class: "sql-tabs", role: "tablist", "aria-label": "Queries" },
+    p.tabs.map((t, i) => h("div", { class: `sql-tab${i === p.active ? " on" : ""}` },
+      h("button", { class: "name", role: "tab", "aria-selected": String(i === p.active),
+        onclick: () => { p.active = i; renderQuery(); },
+        ondblclick: async () => {
+          const name = await askText("Rename query", "Name", t.name, "Rename");
+          if (name) { t.name = name; saveQueryTabs(); renderQuery(); }
+        } }, icon("code", 14), t.name),
+      p.tabs.length > 1 ? h("button", { class: "close", "aria-label": `Close ${t.name}`,
+        onclick: () => { p.tabs.splice(i, 1); p.active = Math.min(p.active, p.tabs.length - 1); saveQueryTabs(); renderQuery(); } }, "×") : null)),
+    h("button", { class: "sql-tab add", "aria-label": "New query",
+      onclick: () => { p.tabs.push({ name: nextTabName(), sql: QUERY_HINT }); p.active = p.tabs.length - 1; saveQueryTabs(); renderQuery(); } }, "+"));
+
+  const runBtn = btn("Run", "play", () => run(), "tool primary");
+  setView(h("div", { class: "sql-page" },
+    h("div", { class: "ribbon" }, h("div", { class: "toolbar" },
+      btn("New SQL query", "add", () => { p.tabs.push({ name: nextTabName(), sql: QUERY_HINT }); p.active = p.tabs.length - 1; saveQueryTabs(); renderQuery(); }),
+      btn("New notebook", "notebook", () => newNotebook(ref)),
+      btn("Refresh", "sync", () => { p.tables = null; p.cols = {}; renderQuery(); }),
+      h("span", { class: "spacer" }),
+      h("span", { class: "muted-text" }, "Queries run on this PC with DuckDB. No Fabric capacity is used."))),
+    h("div", { class: "nb-body" },
+      h("aside", { class: "explorer" }, h("div", { class: "explorer-head" }, "Explorer"),
+        h("div", { class: "tree-row", style: "margin:4px 8px 0;font-weight:600;cursor:default" }, icon("lakehouse", 16),
+          h("span", { class: "label" }, ref.name)),
+        tablesBox),
+      h("section", { class: "sql-main" }, tabs,
+        h("div", { class: "sql-card" },
+          h("div", { class: "sql-actions" }, runBtn,
+            h("span", { class: "muted-text" }, "Ctrl+Enter, or select text to run just that"), h("span", { class: "spacer" }),
+            btn("Save as table", "save", saveAsTable, "tool outline"),
+            btn("Open in notebook", "notebook", openInNotebook, "tool outline")),
+          h("div", { class: "sql-edit" }, gutter, editor),
+          band, grid)))));
+  syncGutter();
+  drawResults();
+  drawTables();
+  if (tab.autorun) { delete tab.autorun; run(tab.sql); }
+  if (!p.tables) {
+    rpc("list_tables", { workspace_id: ref.workspace_id, lakehouse_id: ref.lakehouse_id })
+      .then((t) => { p.tables = t; })
+      .catch((err) => { p.tables = {}; toast(`Could not list tables: ${err}`, true); })
+      .then(() => { if (state.view === "query" && p.ref === ref) drawTables(); });
+  }
+  editor.focus();
 }
 
 async function newLakehouse(ws) {
@@ -1387,7 +1672,7 @@ document.getElementById("account").addEventListener("click", (e) => {
 });
 document.getElementById("search").addEventListener("input", (e) => {
   state.query = e.target.value;
-  if (state.view === "notebook" || state.view === "create" || state.view === "lakehouse") state.view = "home";
+  if (state.view === "notebook" || state.view === "create" || state.view === "lakehouse" || state.view === "query") state.view = "home";
   render();
 });
 document.addEventListener("keydown", (e) => {
