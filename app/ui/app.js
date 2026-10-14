@@ -220,7 +220,7 @@ function render() {
   renderChrome();
   if (state.view !== fabricView.owner) placeFabricView();
   const views = { home: renderHome, create: renderCreate, workspaces: renderWorkspaces, workspace: renderWorkspace,
-    onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, query: renderQuery, notebook: renderNotebook, ...window.META_VIEWS };
+    onelake: renderOneLake, fabric: renderFabric, monitor: renderMonitor, lakehouse: renderLakehouse, query: renderQuery, notebook: renderNotebook, ...window.META_VIEWS };
   (views[state.view] || renderHome)();
 }
 
@@ -459,11 +459,38 @@ async function renderWorkspaces() {
   draw();
 }
 
-// Shows a Fabric page in the OneLake page's Fabric view.
-function openInFabric(url) {
-  fabricView.owner = "onelake";
-  fabricView.page = url;
-  go("onelake");
+// The Fabric page: Fabric's own portal on the whole page. Links across the app open their
+// item here; the page keeps whatever was shown last.
+const FABRIC_HOME = "https://app.fabric.microsoft.com/home?experience=fabric-developer";
+const fabricPage = { page: FABRIC_HOME };
+
+function openInFabric(page) {
+  fabricPage.page = page;
+  if (state.view === "fabric") {
+    invoke("fabric_view_action", { action: "home", page }).catch(() => {});
+  } else {
+    go("fabric");
+  }
+}
+
+function renderFabric() {
+  const slot = h("div", { class: "fabric-slot" },
+    h("p", { class: "muted-text" }, "Opening Fabric. Sign in once and the app keeps it between launches."));
+  const action = (name) => attempt(() => invoke("fabric_view_action", { action: name, page: fabricPage.page }), "Fabric view");
+  setView(h("div", { class: "page monitor fabric-page" },
+    h("section", { class: "card monitor-fabric" },
+      h("div", { class: "monitor-band" },
+        h("h2", {}, "Fabric"),
+        h("span", { class: "spacer" }),
+        btn("Back", null, () => action("back"), "tool outline"),
+        btn("Home", "home", () => openInFabric(FABRIC_HOME), "tool outline"),
+        btn("OneLake catalog", "onelake", () => openInFabric("catalog"), "tool outline"),
+        btn("Monitoring hub", "monitor", () => openInFabric("monitor"), "tool outline"),
+        btn("Reload", "restart", () => action("reload"), "tool outline"),
+        btn("Open in browser", "publish", () => action("browser"), "tool outline")),
+      slot)));
+  dockFabricView(slot, "fabric", fabricPage.page);
+  placeFabricView();
 }
 
 function openWorkspace(ws) {
@@ -528,11 +555,6 @@ const FABRIC_ITEM_PATHS = {
   Report: "reports", PaginatedReport: "rdlreports", DataPipeline: "pipelines", Dashboard: "dashboards", Eventhouse: "eventhouses", KQLDatabase: "databases",
 };
 
-function showInFabric(url) {
-  fabricView.page = url;
-  placeFabricView();
-}
-
 function fabricItemLink(r) {
   const path = FABRIC_ITEM_PATHS[r.type];
   const tail = path ? `${path}/${r.item_id}` : "list";
@@ -553,9 +575,6 @@ const catalogPage = { data: null, tables: null, layers: {}, scope: "all", type: 
 
 async function renderOneLake() {
   const cp = catalogPage;
-  const slot = h("div", { class: "fabric-slot" },
-    h("p", { class: "muted-text" }, "Opening Fabric's OneLake catalog. Sign in once and the app keeps it between launches."));
-  const action = (name) => attempt(() => invoke("fabric_view_action", { action: name, page: "catalog" }), "Fabric view");
   const nav = h("nav", { class: "catalog-nav" });
   const head = h("div", { class: "catalog-head" });
   const list = h("div", { class: "catalog-list" }, h("p", { class: "muted-text", style: "padding:16px" },
@@ -568,17 +587,9 @@ async function renderOneLake() {
     h("section", { class: "card onelake-catalog" },
       h("div", { class: "monitor-band" }, h("h2", {}, "OneLake catalog"),
         h("span", { class: "muted-text" }, "Every item in every workspace you can open"), h("span", { class: "spacer" }), note, search,
-        btn("Refresh", "sync", () => { cp.data = null; render(); }, "tool outline")),
-      h("div", { class: "catalog-body" }, nav, h("section", { class: "catalog-main" }, head, list))),
-    h("section", { class: "card monitor-fabric" },
-      h("div", { class: "monitor-band" }, h("h2", {}, "In Fabric"),
-        h("span", { class: "muted-text" }, "Fabric's own OneLake catalog"), h("span", { class: "spacer" }),
-        btn("Back", null, () => action("back"), "tool outline"),
-        btn("Catalog", "home", () => { fabricView.page = "catalog"; action("home"); }, "tool outline"),
-        btn("Reload", "restart", () => action("reload"), "tool outline"),
-        btn("Open in browser", "publish", () => action("browser"), "tool outline")),
-      slot)));
-  dockFabricView(slot, "onelake", fabricView.owner === "onelake" ? fabricView.page : "catalog");
+        btn("Refresh", "sync", () => { cp.data = null; render(); }, "tool outline"),
+        btn("Open Fabric's catalog", "open", () => openInFabric("catalog"), "tool outline")),
+      h("div", { class: "catalog-body" }, nav, h("section", { class: "catalog-main" }, head, list)))));
   if (!state.user) return;
 
   const here = () => state.view === "onelake" && list.isConnected;
@@ -659,14 +670,14 @@ async function renderOneLake() {
         h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
           "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (ev) => toggleFavorite(r, ev) }, fav ? "★" : "☆")),
         h("td", {}, h("span", { class: "item" }, itemIcon(r.type),
-          h("button", { class: "name-link", title: "Open in Fabric", onclick: () => showInFabric(fabricItemLink(r)) }, r.name))),
+          h("button", { class: "name-link", title: "Open in Fabric", onclick: () => openInFabric(fabricItemLink(r)) }, r.name))),
         h("td", {}, typeLabel(r.type)),
         h("td", {}, h("button", { class: "name-link", title: "Open the workspace in Fabric",
-          onclick: () => showInFabric(fabricItemLink({ workspace_id: r.workspace_id })) }, r.workspace_name)),
+          onclick: () => openInFabric(fabricItemLink({ workspace_id: r.workspace_id })) }, r.workspace_name)),
         h("td", {}, e ? h("span", { class: `pill-s ${e === "Certified" ? "pass" : "info"}` }, e) : ""),
         h("td", {}, (isLh && cp.layers[r.name]) || ""),
         h("td", { class: "actions" },
-          btn("Show in Fabric", null, () => showInFabric(fabricItemLink(r)), "tool small link"),
+          btn("Show in Fabric", null, () => openInFabric(fabricItemLink(r)), "tool small link"),
           isLh ? btn("SQL query", null, () => openSqlQuery(r), "tool small link") : null,
           isLh ? btn("Open in notebook", null, () => newNotebook(r), "tool small link") : null)));
       if (open) {
