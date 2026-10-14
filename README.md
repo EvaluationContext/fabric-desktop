@@ -1,20 +1,24 @@
 # Fabric Desktop
 
-Run data jobs on your own Windows machine and publish the results to Microsoft Fabric as Delta tables, so no Fabric capacity is spent on the transform work.
+Do your Microsoft Fabric data engineering on your own Windows PC: notebooks, Spark SQL queries, jobs and a metadata-driven medallion framework. Results are written straight into OneLake as Delta tables, so no Fabric capacity is spent on the transform work.
 
-- **Local compute:** SQL jobs run in DuckDB and Python jobs run in Polars.
-- **Direct to OneLake:** delta-rs writes each table straight to `Tables/<schema>/<table>` in a schema-enabled lakehouse. It commits the Delta log only after the data files are written, so Fabric never sees a half-written version.
+![Fabric Desktop architecture](docs/architecture.svg)
+
+- **Local compute:** notebooks run in a Python kernel on the PC, SQL runs in DuckDB, and Python transforms run in Polars.
+- **Direct to OneLake:** delta-rs writes each table straight to the lakehouse. It commits the Delta log only after the data files are written, so Fabric never sees a half-written version.
 - **Fabric-safe tables:** every table is checked against a conservative Delta profile (reader 1, writer 2, classic checkpoints, no deletion vectors or column mapping). This keeps tables readable by the SQL analytics endpoint and Direct Lake.
-- **Signs in as you:** the app uses delegated MSAL sign-in. Your token cache lives in `%LOCALAPPDATA%\FabricDesktop`.
+- **Signs in as you:** the app uses delegated MSAL sign-in, with no service principal. Your token cache lives in `%LOCALAPPDATA%\FabricDesktop`.
+- **Fabric's own pages inside the app:** the Monitoring hub and the OneLake catalog are embedded, and their sign-in is kept between launches.
 
-The architecture and MVP plan are in the [project plan doc](https://claude.ai/code/artifact/284becf8-61f3-4329-a8f5-0a28c3059efe).
+How the pieces fit together, how a request flows and how writes reach OneLake: see [docs/architecture.md](docs/architecture.md).
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake addressing, job runner, publisher, JSON-lines server |
+| `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake I/O, notebook kernel, SQL engine, metadata framework, job runner and the JSON-lines server |
 | `app/` | Tauri 2 shell (`src-tauri/`) and the Fabric-style UI (`ui/`, plain HTML and JavaScript). The shell starts the sidecar and forwards UI actions to it |
+| `docs/` | Architecture overview and diagram |
 | `examples/` | Sample jobs (`sales_by_region.toml` for DuckDB, `top_products.toml` for Polars) and sample data |
 
 ## One-time setup: Entra app registration
@@ -61,7 +65,7 @@ cargo run
 
 ## Notebooks
 
-The app looks and works like the Fabric service: the same left rail (Home, Create, Workspaces, OneLake, Monitor), and Python notebooks with a ribbon, an Explorer pane and **Add data items** to attach a lakehouse. Cells run in a Python kernel on this PC, so no Fabric capacity is used.
+The app looks and works like the Fabric service: the same left rail (Home, Create, Workspaces, OneLake, Metadata, Monitor), and Python notebooks with a ribbon, an Explorer pane and **Add data items** to attach a lakehouse. Cells run in a Python kernel on this PC, so no Fabric capacity is used.
 
 **Add data items** opens a OneLake catalog: every lakehouse in every workspace you can open, in one list you can filter, with each lakehouse's tables and files shown before you attach it. The left side filters by Favorites, Endorsed or one workspace. Favorites are the stars you click in the list. They are saved on this PC, because Fabric has no public API for its own favorites. Endorsed (Certified or Promoted) comes from Fabric's admin workspace scan, so it works only when your account is a Fabric administrator and the app registration has the Power BI `Tenant.Read.All` delegated permission with consent. Otherwise the filter is greyed out with the reason.
 
