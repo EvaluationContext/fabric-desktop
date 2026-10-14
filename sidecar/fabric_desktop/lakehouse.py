@@ -23,6 +23,7 @@ from typing import Any, Callable
 import polars as pl
 import pyarrow as pa
 from deltalake import DeltaTable
+from deltalake.exceptions import TableNotFoundError
 
 from .onelake import FileStore, TableRef, storage_options
 from .publish import publish, stage_locally
@@ -38,6 +39,8 @@ class Attached:
     storage_token: Callable[[], str]
     work_dir: Path
     history_file: Path | None = None
+    # False for a lakehouse created without schemas (tables live directly under Tables/).
+    schemas_enabled: Callable[[], bool] = lambda: True
 
 
 @dataclass(frozen=True)
@@ -77,7 +80,12 @@ def name() -> str | None:
 def table_ref(table: str) -> TableRef:
     schema, _, name_ = table.rpartition(".")
     lh = _current()
-    return TableRef(lh.workspace_id, lh.lakehouse_id, schema or "dbo", name_)
+    if lh.schemas_enabled():
+        return TableRef(lh.workspace_id, lh.lakehouse_id, schema or "dbo", name_)
+    if schema not in ("", "dbo"):
+        raise ValueError(f"{lh.name} was created without schemas, so tables have no schema. "
+                         f"Use {name_!r} or 'dbo.{name_}'.")
+    return TableRef(lh.workspace_id, lh.lakehouse_id, "dbo", name_, flat=True)
 
 
 def local_path(path: str) -> Path:
@@ -105,7 +113,13 @@ def read_json(path: str, **kwargs: Any) -> pl.DataFrame:
 def read_table(table: str) -> pl.DataFrame:
     ref = table_ref(table)
     opts = storage_options(_current().storage_token())
-    return pl.from_arrow(DeltaTable(ref.uri, storage_options=opts).to_pyarrow_table())
+    try:
+        delta = DeltaTable(ref.uri, storage_options=opts)
+    except TableNotFoundError as e:
+        folder = ref.uri.split("/Tables/", 1)[1]
+        raise TableNotFoundError(f"No Delta table at Tables/{folder} in {_current().name}. "
+                                 f"Check the name in the Explorer. ({e})") from None
+    return pl.from_arrow(delta.to_pyarrow_table())
 
 
 def files(directory: str = "Files") -> list[str]:

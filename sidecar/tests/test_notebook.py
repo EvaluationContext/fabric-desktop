@@ -129,3 +129,43 @@ def test_server_keeps_prints_out_of_the_protocol_and_speaks_utf8(tmp_path):
 def _base_env():
     import os
     return {k: v for k, v in os.environ.items() if k != "LOCALAPPDATA"}
+
+
+def _attach(tmp_path, schemas):
+    lakehouse.attach(lakehouse.Attached("ws1", "lh1", "Fabric_Lakehouse", lambda: "tok", tmp_path,
+                                        schemas_enabled=lambda: schemas))
+
+
+def test_lakehouse_without_schemas_keeps_tables_under_tables_root(tmp_path):
+    _attach(tmp_path, False)
+    try:
+        assert lakehouse.table_ref("dbo.sales").uri.endswith("/lh1/Tables/sales")
+        assert lakehouse.table_ref("sales").uri.endswith("/lh1/Tables/sales")
+        with pytest.raises(ValueError, match="without schemas"):
+            lakehouse.table_ref("crm.sales")
+        _attach(tmp_path, True)
+        assert lakehouse.table_ref("sales").uri.endswith("/lh1/Tables/dbo/sales")
+    finally:
+        lakehouse.attach(None)
+
+
+def test_schema_layout_comes_from_the_lakehouse_default_schema(tmp_path):
+    service = Service(client_id="x", root=tmp_path)
+    answers = {"lh1": {"properties": {"defaultSchema": "dbo"}}, "lh2": {"properties": {}}}
+    service._auth = type("A", (), {"fabric_token": lambda s: "tok"})()
+    import fabric_desktop.service as service_mod
+
+    class Client:
+        def __init__(self, token):
+            pass
+
+        def get_lakehouse(self, ws, lh):
+            return answers[lh]
+
+    original = service_mod.FabricClient
+    service_mod.FabricClient = Client
+    try:
+        assert service._schemas_enabled("ws1", "lh1") is True
+        assert service._schemas_enabled("ws1", "lh2") is False
+    finally:
+        service_mod.FabricClient = original
