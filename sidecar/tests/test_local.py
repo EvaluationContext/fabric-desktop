@@ -124,12 +124,24 @@ def test_catalog_lists_lakehouses_across_workspaces_and_keeps_favorites(tmp_path
                 raise RuntimeError("capacity is paused")
             return [{"id": "lh1", "displayName": "LH_Gold"}]
 
+        def list_items(self, ws):
+            if ws == "w2":
+                raise RuntimeError("capacity is paused")
+            return [{"id": "lh1", "displayName": "LH_Gold", "type": "Lakehouse"},
+                    {"id": "nb1", "displayName": "Load orders", "type": "Notebook"}]
+
     monkeypatch.setattr(service_mod, "FabricClient", Client)
     svc = Service(client_id="x", root=tmp_path)
     svc._auth = Auth()
     assert svc.set_favorite("lh1", True) == ["lh1"]
     catalog = svc.catalog()
-    assert catalog["items"] == [{"workspace_id": "w1", "workspace_name": "Sales", "lakehouse_id": "lh1", "name": "LH_Gold"}]
+    gold = {"workspace_id": "w1", "workspace_name": "Sales", "item_id": "lh1", "lakehouse_id": "lh1",
+            "name": "LH_Gold", "type": "Lakehouse", "description": ""}
+    assert catalog["items"] == [gold]
+    everything = svc.catalog(all_types=True)["items"]
+    assert everything[0] == gold
+    assert everything[1] == {"workspace_id": "w1", "workspace_name": "Sales", "item_id": "nb1", "name": "Load orders",
+                             "type": "Notebook", "description": ""}
     assert catalog["skipped"] == ["Paused"]
     assert catalog["favorites"] == ["lh1"]
     assert svc.set_favorite("lh1", False) == []

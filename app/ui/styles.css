@@ -382,5 +382,17 @@ h2.flush { margin: 0; }
 .monitor-scroll { overflow: auto; }
 .monitor-scroll .list { border: 0; border-radius: 0; }
 .monitor-empty { padding: 14px; margin: 0; }
+.onelake-catalog { flex: 0 1 auto; height: 55%; min-height: 260px; display: flex; flex-direction: column; overflow: hidden; }
+.onelake-catalog .catalog-body { border: 0; border-radius: 0; }
+.onelake-catalog .catalog-head { flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 14px; }
+.onelake .monitor-fabric { min-height: 260px; }
+.catalog-search.small { width: auto; min-height: 28px; margin: 0 4px 6px; font-size: 12.5px; }
+.catalog-ws { display: flex; flex-direction: column; gap: 2px; }
+.chip { min-height: 26px; padding: 0 10px; border: 1px solid var(--border-input); border-radius: 999px; background: var(--surface); font-size: 12px; cursor: pointer; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sort { border: 0; background: transparent; padding: 0; font: inherit; font-weight: 600; color: inherit; cursor: pointer; }
+.sort.on { color: var(--accent-dark); }
+.catalog-list .list td.actions { white-space: nowrap; }
+.catalog-list .list tr.sub-row td { background: #fafafa; }
 .monitor-fabric { flex: 1; min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
 .fabric-slot { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; }

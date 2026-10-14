@@ -33,6 +33,8 @@ class Service(MetaMixin):
         self.kernel = Kernel()
         self.notebooks = NotebookStore(self.root / "notebooks")
         self._schema_cache: dict[str, bool] = {}
+        self._tables: dict[str, Any] | None = None
+        self._tables_lock = threading.Lock()
         self._endorse: dict[str, Any] | None = None
         self._endorse_lock = threading.Lock()
 
@@ -72,27 +74,67 @@ class Service(MetaMixin):
     def list_lakehouses(self, workspace_id: str) -> list[dict[str, Any]]:
         return self.fabric.list_lakehouses(workspace_id)
 
-    def catalog(self) -> dict[str, Any]:
-        """Every lakehouse in every workspace the user can open, for the Add data items picker."""
+    def catalog(self, all_types: bool = False) -> dict[str, Any]:
+        """Every lakehouse (or, with all_types, every item) in every workspace the user can open.
+
+        Rows carry ``item_id``; lakehouse rows also carry ``lakehouse_id``, so a row can be
+        attached to a notebook as it is."""
         token = self.auth.fabric_token()  # once: the MSAL cache is not shared across threads
         workspaces = FabricClient(lambda: token).list_workspaces()
+        with self._tables_lock:  # a reloaded catalog reads table names afresh
+            if self._tables and not self._tables["pending"]:
+                self._tables = None
 
-        def lakehouses(ws: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+        def listing(ws: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+            client = FabricClient(lambda: token)
             try:
-                return ws, FabricClient(lambda: token).list_lakehouses(ws["id"])
+                if all_types:
+                    return ws, client.list_items(ws["id"])
+                return ws, [lh | {"type": "Lakehouse"} for lh in client.list_lakehouses(ws["id"])]
             except Exception:  # e.g. a paused capacity; list the rest
                 return ws, None
 
         items, skipped = [], []
         with ThreadPoolExecutor(max_workers=8) as pool:
-            for ws, found in pool.map(lakehouses, workspaces):
+            for ws, found in pool.map(listing, workspaces):
                 if found is None:
                     skipped.append(ws["displayName"])
                     continue
-                items += [{"workspace_id": ws["id"], "workspace_name": ws["displayName"],
-                           "lakehouse_id": lh["id"], "name": lh["displayName"]} for lh in found]
+                for it in found:
+                    row = {"workspace_id": ws["id"], "workspace_name": ws["displayName"], "item_id": it["id"],
+                           "name": it["displayName"], "type": it.get("type", ""), "description": it.get("description", "")}
+                    if row["type"] == "Lakehouse":
+                        row["lakehouse_id"] = it["id"]
+                    items.append(row)
         return {"workspaces": [{"id": w["id"], "displayName": w["displayName"]} for w in workspaces],
                 "items": items, "skipped": skipped, "favorites": sorted(self._favorites())}
+
+    def catalog_tables(self, lakehouses: list[dict[str, str]]) -> dict[str, Any]:
+        """Table names per lakehouse id ("schema.table"), so the catalog can search inside lakehouses.
+
+        Runs in the background like endorsements: {"pending": True} until every lakehouse is read."""
+        with self._tables_lock:
+            if self._tables is not None:
+                return dict(self._tables)
+            token = self.auth.storage_token()
+            self._tables = {"pending": True, "items": {}}
+
+        def read(ref: dict[str, str]) -> tuple[str, list[str]]:
+            catalog = TableCatalog(lambda: token)
+            try:
+                return ref["lakehouse_id"], [f"{schema}.{t}" for schema in catalog.list_schemas(ref["workspace_id"], ref["lakehouse_id"])
+                                             for t in catalog.list_tables(ref["workspace_id"], ref["lakehouse_id"], schema)]
+            except Exception:
+                return ref["lakehouse_id"], []
+
+        def run() -> None:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                found = dict(pool.map(read, lakehouses))
+            with self._tables_lock:
+                self._tables = {"pending": False, "items": found}
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"pending": True, "items": {}}
 
     def endorsements(self, workspace_ids: list[str]) -> dict[str, Any]:
         """Endorsement per lakehouse id, when the account can read Fabric's admin scan.

@@ -207,7 +207,7 @@ function renderChrome() {
 
 function render() {
   renderChrome();
-  if (state.view !== "monitor") placeFabricView();
+  if (state.view !== fabricView.owner) placeFabricView();
   const views = { home: renderHome, create: renderCreate, workspaces: renderWorkspaces, workspace: renderWorkspace,
     onelake: renderOneLake, monitor: renderMonitor, lakehouse: renderLakehouse, notebook: renderNotebook, ...window.META_VIEWS };
   (views[state.view] || renderHome)();
@@ -235,7 +235,7 @@ async function renderHome() {
     h("div", { class: "tiles" },
       tile("notebook", "New notebook", "Python on this PC, attached to a lakehouse", newNotebook),
       tile("lakehouse", "New lakehouse", "A schema-enabled lakehouse in a workspace", () => newLakehouse()),
-      tile("onelake", "OneLake catalog", "Browse lakehouses across your workspaces", () => go("onelake"))),
+      tile("onelake", "OneLake catalog", "Find any item across your workspaces", () => go("onelake"))),
     h("h2", {}, "Recent notebooks"), list));
   const notebooks = (await attempt(() => rpc("list_notebooks"))) || [];
   if (state.view !== "home") return;
@@ -267,7 +267,7 @@ async function renderMonitor() {
   const local = h("div", { class: "muted-text monitor-empty" }, "Loading runs...");
   const slot = h("div", { class: "fabric-slot" },
     h("p", { class: "muted-text" }, "Opening the Fabric Monitoring hub. Sign in once and the app remembers it."));
-  const action = (name) => attempt(() => invoke("fabric_view_action", { action: name }), "Fabric view");
+  const action = (name) => attempt(() => invoke("fabric_view_action", { action: name, page: "monitor" }), "Fabric view");
   setView(h("div", { class: "page monitor" },
     h("section", { class: "card monitor-local" },
       h("div", { class: "monitor-band" },
@@ -286,7 +286,7 @@ async function renderMonitor() {
         btn("Reload", "restart", () => action("reload"), "tool outline"),
         btn("Open in browser", "publish", () => action("browser"), "tool outline")),
       slot)));
-  dockFabricView(slot);
+  dockFabricView(slot, "monitor", "monitor");
 
   const [writes, runs] = await Promise.all([
     attempt(() => rpc("history")),
@@ -315,13 +315,17 @@ async function renderMonitor() {
     h("p", { class: "muted-text monitor-empty" }, "Nothing has run on this PC yet. Run a metadata entity or write a table from a notebook."));
 }
 
-// Fabric's Monitoring hub is a second webview the shell lays over the slot's box. It is a
-// native view, so it is hidden whenever the slot isn't showing or a dialog is open over it.
-const fabricView = { slot: null, observer: null, frame: 0 };
+// Fabric's own pages (Monitoring hub, OneLake catalog) are one second webview the shell lays
+// over the slot's box. It is a native view, so it is hidden whenever the slot isn't showing or a
+// dialog is open over it. owner is the app view showing it; page is "monitor", "catalog" or a
+// Fabric item link.
+const fabricView = { slot: null, observer: null, frame: 0, owner: null, page: "monitor" };
 
-function dockFabricView(slot) {
+function dockFabricView(slot, owner, page) {
   fabricView.observer?.disconnect();
   fabricView.slot = slot;
+  fabricView.owner = owner;
+  fabricView.page = page;
   fabricView.observer = new ResizeObserver(placeFabricView);
   fabricView.observer.observe(slot);
 }
@@ -331,13 +335,13 @@ function placeFabricView() {
   fabricView.frame = requestAnimationFrame(() => {
     const slot = fabricView.slot;
     const covered = document.getElementById("dialog-root").childElementCount > 0;
-    if (state.view !== "monitor" || !slot?.isConnected || covered) {
+    if (state.view !== fabricView.owner || !slot?.isConnected || covered) {
       invoke("fabric_view_hide").catch(() => {});
       return;
     }
     const r = slot.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return;
-    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height, tenant: state.tenant || null }).catch((err) => {
+    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height, tenant: state.tenant || null, page: fabricView.page }).catch((err) => {
       slot.replaceChildren(h("p", { class: "muted-text" }, `The Fabric view could not open: ${err}`));
     });
   });
@@ -388,33 +392,187 @@ async function renderWorkspace() {
     h("p", { class: "muted-text" }, "No lakehouses in this workspace yet."));
 }
 
+// ---------- OneLake catalog page ----------
+
+// Fabric item types as people say them: SemanticModel -> Semantic model, KQLDatabase -> KQL database.
+function typeLabel(type) {
+  const words = String(type).replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").replace(/([a-z])([A-Z])/g, "$1 $2").split(" ");
+  return words.map((w, i) => (i && w !== w.toUpperCase() ? w.toLowerCase() : w)).join(" ");
+}
+
+// Paths of item pages in the Fabric portal, by item type; other types open their workspace.
+const FABRIC_ITEM_PATHS = {
+  Lakehouse: "lakehouses", Warehouse: "datawarehouses", Notebook: "synapsenotebooks", SemanticModel: "datasets",
+  Report: "reports", DataPipeline: "pipelines", Dashboard: "dashboards", Eventhouse: "eventhouses", KQLDatabase: "databases",
+};
+
+function fabricItemLink(r) {
+  const path = FABRIC_ITEM_PATHS[r.type];
+  const tail = path ? `${path}/${r.item_id}` : "list";
+  return `https://app.fabric.microsoft.com/groups/${r.workspace_id}/${tail}?experience=fabric-developer`;
+}
+
+// Endorsement and table names come from slow background reads in the sidecar; ask until done.
+async function pollSidecar(method, params, done, keepGoing) {
+  for (let i = 0; i < 90 && keepGoing(); i++) {
+    if (i) await new Promise((r) => setTimeout(r, 2000));
+    const result = await rpc(method, params).catch((err) => ({ pending: false, available: false, items: {}, reason: String(err) }));
+    if (!result.pending) { done(result); return; }
+  }
+}
+
+const catalogPage = { data: null, tables: null, layers: {}, scope: "all", type: "all", query: "",
+                      wsQuery: "", sort: "name", dir: 1, open: new Set() };
+
 async function renderOneLake() {
-  const body = h("div", { class: "muted-text" }, state.user ? "Loading lakehouses..." : "");
-  setView(h("div", { class: "page" }, h("h1", {}, "OneLake catalog"),
-    h("p", { class: "sub" }, "Lakehouses across all your workspaces."), signInCallout(), body));
+  const cp = catalogPage;
+  const slot = h("div", { class: "fabric-slot" },
+    h("p", { class: "muted-text" }, "Opening Fabric's OneLake catalog. Sign in once and the app keeps it between launches."));
+  const action = (name) => attempt(() => invoke("fabric_view_action", { action: name, page: "catalog" }), "Fabric view");
+  const nav = h("nav", { class: "catalog-nav" });
+  const head = h("div", { class: "catalog-head" });
+  const list = h("div", { class: "catalog-list" }, h("p", { class: "muted-text", style: "padding:16px" },
+    state.user ? "Loading items from all workspaces..." : ""));
+  const note = h("span", { class: "muted-text" });
+  const search = h("input", { class: "catalog-search", placeholder: "Search by name, workspace or table", value: cp.query, "aria-label": "Search the catalog" });
+  search.addEventListener("input", () => { cp.query = search.value; draw(); });
+
+  setView(h("div", { class: "page monitor onelake" }, signInCallout(),
+    h("section", { class: "card onelake-catalog" },
+      h("div", { class: "monitor-band" }, h("h2", {}, "OneLake catalog"),
+        h("span", { class: "muted-text" }, "Every item in every workspace you can open"), h("span", { class: "spacer" }), note, search,
+        btn("Refresh", "sync", () => { cp.data = null; render(); }, "tool outline")),
+      h("div", { class: "catalog-body" }, nav, h("section", { class: "catalog-main" }, head, list))),
+    h("section", { class: "card monitor-fabric" },
+      h("div", { class: "monitor-band" }, h("h2", {}, "In Fabric"),
+        h("span", { class: "muted-text" }, "Fabric's own OneLake catalog"), h("span", { class: "spacer" }),
+        btn("Back", null, () => action("back"), "tool outline"),
+        btn("Catalog", "home", () => { fabricView.page = "catalog"; action("home"); }, "tool outline"),
+        btn("Reload", "restart", () => action("reload"), "tool outline"),
+        btn("Open in browser", "publish", () => action("browser"), "tool outline")),
+      slot)));
+  dockFabricView(slot, "onelake", fabricView.owner === "onelake" ? fabricView.page : "catalog");
   if (!state.user) return;
-  const rows = [];
-  const skipped = [];
-  for (const ws of await loadWorkspaces()) {
-    try {
-      const lakehouses = await rpc("list_lakehouses", { workspace_id: ws.id });
-      lakehouses.forEach((lh) => rows.push(lakehouseRef(ws, lh)));
-    } catch (err) {
-      // A workspace on a paused capacity can't list items; show the rest.
-      skipped.push(String(err).includes("capacity is paused") ? `${ws.displayName} (capacity paused)` : ws.displayName);
+
+  const here = () => state.view === "onelake" && list.isConnected;
+  const key = (r) => r.item_id;
+  const favorites = () => new Set(cp.data?.favorites || []);
+  const endorsed = () => state.endorsements?.items || {};
+  const tablesOf = (r) => cp.tables?.[r.item_id] || [];
+
+  function inScope(r) {
+    if (cp.scope === "fav") return favorites().has(key(r));
+    if (cp.scope === "endorsed") return !!endorsed()[key(r)];
+    if (cp.scope.startsWith("ws:")) return r.workspace_id === cp.scope.slice(3);
+    return true;
+  }
+  const sortValue = { name: (r) => r.name, type: (r) => typeLabel(r.type), ws: (r) => r.workspace_name,
+    endorsement: (r) => endorsed()[key(r)] || "~", layer: (r) => (r.type === "Lakehouse" && cp.layers[r.name]) || "~" };
+
+  function shown() {
+    const q = cp.query.toLowerCase();
+    return cp.data.items.filter((r) => inScope(r) && (cp.type === "all" || r.type === cp.type)
+      && (!q || `${r.name} ${r.workspace_name} ${typeLabel(r.type)} ${r.description} ${tablesOf(r).join(" ")}`.toLowerCase().includes(q)))
+      .sort((a, b) => cp.dir * String(sortValue[cp.sort](a)).localeCompare(String(sortValue[cp.sort](b)), undefined, { sensitivity: "base" }));
+  }
+
+  async function toggleFavorite(r, e) {
+    e.stopPropagation();
+    const result = await attempt(() => rpc("set_favorite", { lakehouse_id: key(r), favorite: !favorites().has(key(r)) }), "Could not save the favorite");
+    if (result) { cp.data.favorites = result; draw(); }
+  }
+
+  function scopeButton(scope, label, glyph, count, disabled, title) {
+    return h("button", { class: `catalog-scope${cp.scope === scope ? " on" : ""}`, disabled, title,
+      onclick: () => { cp.scope = scope; draw(); } },
+    h("span", { class: "glyph" }, glyph), h("span", { class: "label" }, label), h("span", { class: "count" }, count));
+  }
+
+  function draw() {
+    if (!cp.data || !here()) return;
+    const items = cp.data.items;
+    const end = state.endorsements;
+    const wsFilter = h("input", { class: "catalog-search small", placeholder: "Find a workspace", value: cp.wsQuery, "aria-label": "Find a workspace" });
+    wsFilter.addEventListener("input", () => { cp.wsQuery = wsFilter.value; drawWorkspaces(); wsFilter.focus(); });
+    const wsList = h("div", { class: "catalog-ws" });
+    const drawWorkspaces = () => wsList.replaceChildren(...cp.data.workspaces
+      .filter((w) => w.displayName.toLowerCase().includes(cp.wsQuery.toLowerCase()))
+      .map((w) => scopeButton(`ws:${w.id}`, w.displayName, "▢", items.filter((r) => r.workspace_id === w.id).length)));
+    drawWorkspaces();
+    const keepFocus = document.activeElement === nav.querySelector(".catalog-search");
+    nav.replaceChildren(
+      scopeButton("all", "All items", "▦", items.length),
+      scopeButton("fav", "Favorites", "★", items.filter((r) => favorites().has(key(r))).length),
+      scopeButton("endorsed", "Endorsed", "✓", end?.available ? items.filter((r) => endorsed()[key(r)]).length : "",
+        !end?.available, !end ? "Checking endorsement..." : end.reason || ""),
+      h("div", { class: "sec" }, "Workspaces"), wsFilter, wsList);
+    if (keepFocus) wsFilter.focus();
+
+    const counts = {};
+    items.forEach((r) => { counts[r.type] = (counts[r.type] || 0) + 1; });
+    const types = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+    const rows = shown();
+    const chip = (type, label) => h("button", { class: `chip${cp.type === type ? " on" : ""}`, onclick: () => { cp.type = type; draw(); } }, label);
+    head.replaceChildren(h("span", { class: "muted-text", style: "font-weight:600" }, "Type"), chip("all", "All"),
+      ...types.map((t) => chip(t, `${typeLabel(t)} ${counts[t]}`)), h("span", { class: "spacer" }),
+      h("span", { class: "muted-text" }, `${rows.length} item${rows.length === 1 ? "" : "s"}`));
+
+    const sortHead = (col, label) => h("th", {}, h("button", { class: `sort${cp.sort === col ? " on" : ""}`,
+      onclick: () => { cp.dir = cp.sort === col ? -cp.dir : 1; cp.sort = col; draw(); } },
+    label + (cp.sort === col ? (cp.dir > 0 ? " ▲" : " ▼") : "")));
+    const body = [];
+    for (const r of rows) {
+      const fav = favorites().has(key(r));
+      const isLh = r.type === "Lakehouse";
+      const open = isLh && cp.open.has(key(r));
+      const e = endorsed()[key(r)];
+      body.push(h("tr", {},
+        h("td", {}, isLh ? h("button", { class: "star", title: open ? "Hide tables" : "Show tables", "aria-label": open ? "Hide tables" : "Show tables",
+          onclick: () => { open ? cp.open.delete(key(r)) : cp.open.add(key(r)); draw(); } }, open ? "▾" : "▸") : ""),
+        h("td", {}, h("button", { class: `star${fav ? " on" : ""}`, title: fav ? "Remove from favorites" : "Add to favorites",
+          "aria-label": fav ? "Remove from favorites" : "Add to favorites", onclick: (ev) => toggleFavorite(r, ev) }, fav ? "★" : "☆")),
+        h("td", {}, h("span", { class: "item" }, isLh ? icon("lakehouse", 18) : null, r.name)),
+        h("td", {}, typeLabel(r.type)),
+        h("td", {}, r.workspace_name),
+        h("td", {}, e ? h("span", { class: `pill-s ${e === "Certified" ? "pass" : "info"}` }, e) : ""),
+        h("td", {}, (isLh && cp.layers[r.name]) || ""),
+        h("td", { class: "actions" },
+          btn("Show in Fabric", null, () => { fabricView.page = fabricItemLink(r); placeFabricView(); }, "tool small link"),
+          isLh ? btn("Open in notebook", null, () => newNotebook(r), "tool small link") : null)));
+      if (open) {
+        const tree = h("div", { class: "explorer-content", style: "padding:0" });
+        body.push(h("tr", { class: "sub-row" }, h("td", {}), h("td", {}), h("td", { colspan: 6 }, tree)));
+        renderTree(tree, r, null);
+      }
     }
-    if (state.view !== "onelake") return;
+    list.replaceChildren(rows.length ? h("table", { class: "list" },
+      h("thead", {}, h("tr", {}, h("th", { style: "width:28px" }), h("th", { style: "width:32px" }),
+        sortHead("name", "Name"), sortHead("type", "Type"), sortHead("ws", "Location"),
+        sortHead("endorsement", "Endorsement"), sortHead("layer", "Layer"), h("th", {}))),
+      h("tbody", {}, body)) : h("p", { class: "muted-text", style: "padding:16px" },
+      cp.scope === "fav" && !cp.query ? "No favorites yet. Click the star next to an item." : "Nothing matches."));
+
+    const parts = [];
+    if (cp.data.skipped.length) parts.push(`Skipped ${cp.data.skipped.length} workspace${cp.data.skipped.length === 1 ? "" : "s"}: ${cp.data.skipped.join(", ")}.`);
+    if (!cp.tables) parts.push("Reading table names for search...");
+    note.textContent = parts.join(" ");
   }
-  if (skipped.length) {
-    body.before(h("p", { class: "muted-text" }, `Skipped ${skipped.length} workspace${skipped.length === 1 ? "" : "s"}: ${skipped.join(", ")}.`));
+
+  if (cp.data) { draw(); return; }
+  rpc("meta_project").then((p) => { (p.layers || []).forEach((l) => { cp.layers[l.lakehouse] = l.name; }); draw(); }).catch(() => {});
+  const data = await attempt(() => rpc("catalog", { all_types: true }), "Could not list the catalog");
+  if (!data || !here()) return;
+  cp.data = data;
+  cp.tables = null;
+  state.workspaces = data.workspaces;
+  draw();
+  const lakehouses = data.items.filter((r) => r.type === "Lakehouse")
+    .map((r) => ({ workspace_id: r.workspace_id, lakehouse_id: r.item_id }));
+  pollSidecar("catalog_tables", { lakehouses }, (result) => { cp.tables = result.items || {}; draw(); }, () => cp.data === data);
+  if (!state.endorsements) {
+    pollSidecar("endorsements", { workspace_ids: data.workspaces.map((w) => w.id) },
+      (result) => { state.endorsements = result; draw(); }, () => cp.data === data);
   }
-  const shown = rows.filter((r) => matches(`${r.name} ${r.workspace_name}`));
-  body.replaceWith(shown.length ? h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Workspace"), h("th", {}, "Type"))),
-    h("tbody", {}, shown.map((r) => h("tr", { class: "click", onclick: () => openLakehouse(r) },
-      h("td", {}, h("span", { class: "item" }, icon("lakehouse", 18), r.name)),
-      h("td", {}, r.workspace_name), h("td", {}, "Lakehouse"))))) :
-    h("p", { class: "muted-text" }, "No lakehouses found."));
 }
 
 function openLakehouse(ref) {
@@ -662,7 +820,7 @@ async function openDataItems() {
     if (ref) { state.view = view; attachLakehouse(ref); }
   }, "tool link");
   const workspaceById = (id) => pick.catalog?.workspaces.find((w) => w.id === id) || null;
-  const key = (r) => r.lakehouse_id;
+  const key = (r) => r.item_id;
   const favorites = () => new Set(pick.catalog?.favorites || []);
   const endorsed = () => state.endorsements?.items || {};
 
@@ -759,13 +917,10 @@ async function openDataItems() {
     if (r) select(r, null);
     draw();
   }
-  // The sidecar scans in the background; ask again until it is done.
-  for (let i = 0; i < 60 && !(state.endorsements && !state.endorsements.pending) && overlay.isConnected; i++) {
-    if (i) await new Promise((r) => setTimeout(r, 2000));
-    state.endorsements = await rpc("endorsements", { workspace_ids: catalog.workspaces.map((w) => w.id) })
-      .catch((err) => ({ pending: false, available: false, items: {}, reason: String(err) }));
+  if (!state.endorsements) {
+    await pollSidecar("endorsements", { workspace_ids: catalog.workspaces.map((w) => w.id) },
+      (result) => { state.endorsements = result; }, () => overlay.isConnected);
   }
-  if (state.endorsements?.pending) state.endorsements = null;
   if (overlay.isConnected) draw();
 }
 
