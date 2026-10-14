@@ -51,7 +51,11 @@ class WriteResult:
     uri: str
 
     def __repr__(self) -> str:
-        return f"Wrote {self.rows} rows to {self.table} (Delta version {self.delta_version})"
+        text = f"Wrote {self.rows} rows to {self.table} (Delta version {self.delta_version})"
+        if self.delta_version == 0:
+            # Fabric lists a table written from outside under Unidentified until the lakehouse is refreshed.
+            text += ". New table: refresh the lakehouse in Fabric if it shows under Unidentified"
+        return text
 
 
 _attached: Attached | None = None
