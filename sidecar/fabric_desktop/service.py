@@ -32,6 +32,7 @@ class Service(MetaMixin):
         self._auth: Authenticator | None = None
         self.kernel = Kernel()
         self.notebooks = NotebookStore(self.root / "notebooks")
+        self._schema_cache: dict[str, bool] = {}
         self._endorse: dict[str, Any] | None = None
         self._endorse_lock = threading.Lock()
 
@@ -177,8 +178,19 @@ class Service(MetaMixin):
         lakehouse.attach(None if not lakehouse_ref else lakehouse.Attached(
             workspace_id=lakehouse_ref["workspace_id"], lakehouse_id=lakehouse_ref["lakehouse_id"],
             name=lakehouse_ref["name"], storage_token=lambda: self.auth.storage_token(),
-            work_dir=self.root, history_file=self.history_file))
+            work_dir=self.root, history_file=self.history_file,
+            schemas_enabled=lambda: self._schemas_enabled(lakehouse_ref["workspace_id"], lakehouse_ref["lakehouse_id"])))
         return self.kernel.run(code)
+
+    def _schemas_enabled(self, workspace_id: str, lakehouse_id: str) -> bool:
+        """Fabric reports a defaultSchema only for lakehouses created with schemas. Asked once per lakehouse."""
+        if lakehouse_id not in self._schema_cache:
+            try:
+                props = self.fabric.get_lakehouse(workspace_id, lakehouse_id).get("properties") or {}
+                self._schema_cache[lakehouse_id] = bool(props.get("defaultSchema"))
+            except Exception:  # offline or no access: keep the schema layout this app creates
+                return True
+        return self._schema_cache[lakehouse_id]
 
     def restart_kernel(self) -> dict[str, Any]:
         self.kernel.restart()

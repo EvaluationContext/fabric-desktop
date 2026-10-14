@@ -110,6 +110,9 @@ class FabricClient:
                             found[item["id"]] = endorsement
         return found
 
+    def get_lakehouse(self, workspace_id: str, lakehouse_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/workspaces/{workspace_id}/lakehouses/{lakehouse_id}").json()
+
     def create_lakehouse(self, workspace_id: str, name: str, description: str = "") -> dict[str, Any]:
         """Create a schema-enabled lakehouse."""
         body = {"displayName": name, "creationPayload": {"enableSchemas": True}}

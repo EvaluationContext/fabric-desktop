@@ -30,6 +30,8 @@ class TableRef:
     lakehouse_id: str
     schema: str
     table: str
+    # A lakehouse created without schemas keeps its tables directly under Tables/.
+    flat: bool = False
 
     def __post_init__(self):
         check_name("schema", self.schema)
@@ -38,7 +40,8 @@ class TableRef:
     @property
     def uri(self) -> str:
         # GUIDs avoid ABFS failures on workspace names with spaces.
-        return f"abfss://{self.workspace_id}@{DFS_HOST}/{self.lakehouse_id}/Tables/{self.schema}/{self.table}"
+        folder = self.table if self.flat else f"{self.schema}/{self.table}"
+        return f"abfss://{self.workspace_id}@{DFS_HOST}/{self.lakehouse_id}/Tables/{folder}"
 
 
 def storage_options(token: str) -> dict[str, str]:
