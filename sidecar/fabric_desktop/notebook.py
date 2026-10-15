@@ -650,7 +650,7 @@ def _cell_meta(md: dict[str, Any]) -> dict[str, Any]:
 
 
 def to_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None,
-             compute: str = "default") -> dict[str, Any]:
+             compute: str = "default", workspace: dict[str, Any] | None = None) -> dict[str, Any]:
     nb_cells = []
     for c in cells:
         cell = {"cell_type": "markdown" if c.get("type") == "markdown" else "code",
@@ -664,6 +664,10 @@ def to_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None,
     }
     if compute != "default":
         metadata["fabric_desktop"] = {"compute": compute}
+    if workspace and workspace.get("workspace_id"):
+        # Where Publish to OneLake (and Fabric runs and schedules) put this notebook.
+        metadata.setdefault("fabric_desktop", {})["workspace"] = {
+            "workspace_id": workspace["workspace_id"], "workspace_name": workspace.get("workspace_name", "")}
     if lakehouse:
         metadata.setdefault("fabric_desktop", {})["lakehouse"] = lakehouse
         # Fabric reads this to show the default lakehouse when the notebook is published.
@@ -687,7 +691,8 @@ def from_ipynb(nb: dict[str, Any]) -> dict[str, Any]:
         cells.append(cell)
     ours = nb.get("metadata", {}).get("fabric_desktop", {})
     compute = ours.get("compute") if ours.get("compute") in COMPUTE else "default"
-    return {"cells": cells, "lakehouse": ours.get("lakehouse"), "compute": compute}
+    return {"cells": cells, "lakehouse": ours.get("lakehouse"), "compute": compute,
+            "workspace": ours.get("workspace")}
 
 
 class NotebookStore:
@@ -708,16 +713,20 @@ class NotebookStore:
         return {"name": name, **from_ipynb(nb)}
 
     def save(self, name: str, cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None = None,
-             compute: str | None = None) -> dict[str, Any]:
+             compute: str | None = None, workspace: dict[str, Any] | None = None) -> dict[str, Any]:
         """Save the notebook. ``compute`` is where Run all runs it: "local" (this PC), "fabric",
-        or "default" (whatever the environment picked in the top bar runs on). None keeps the saved choice."""
+        or "default" (whatever the environment picked in the top bar runs on). ``workspace`` is
+        where it is published ({"workspace_id", "workspace_name"}; {} forgets it). None keeps the saved choice."""
         path = self.path(name)
+        saved = self.load(name) if path.exists() and (compute is None or workspace is None) else {}
         if compute is None:
-            compute = self.load(name)["compute"] if path.exists() else "default"
+            compute = saved.get("compute", "default")
+        if workspace is None:
+            workspace = saved.get("workspace")
         if compute not in COMPUTE:
             raise ValueError(f"compute is one of {', '.join(COMPUTE)}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(to_ipynb(cells, lakehouse, compute), indent=1), encoding="utf-8")
+        path.write_text(json.dumps(to_ipynb(cells, lakehouse, compute, workspace), indent=1), encoding="utf-8")
         return {"name": name}
 
     def new(self, prefix: str = "Notebook") -> dict[str, Any]:

@@ -124,6 +124,9 @@ function showMenu(anchor, items) {
     items.map((it) => it.info ? h("div", { class: "info" }, it.info)
       : btn(it.label, it.icon, () => { closeMenu(); it.action(); })));
   document.body.append(menu);
+  // A button near the right edge (Publish options): keep the menu on screen.
+  const overflow = menu.getBoundingClientRect().right - (window.innerWidth - 8);
+  if (overflow > 0) menu.style.left = `${Math.max(8, rect.left - overflow)}px`;
   setTimeout(() => document.addEventListener("mousedown", closeMenuOutside), 0);
 }
 
@@ -1171,12 +1174,12 @@ async function newLakehouse(ws) {
   return lh ? lakehouseRef(ws, lh) : null;
 }
 
-function pickWorkspace(workspaces) {
+function pickWorkspace(workspaces, { title = "Choose a workspace", selected = null, okLabel = "Next", note = null } = {}) {
   return new Promise((resolve) => {
-    const select = h("select", {}, workspaces.map((w) => h("option", { value: w.id }, w.displayName)));
-    showDialog("Choose a workspace", h("label", { class: "field" }, "Workspace", select), [
+    const select = h("select", {}, workspaces.map((w) => h("option", { value: w.id, selected: w.id === selected }, w.displayName)));
+    showDialog(title, h("div", {}, note ? h("p", { class: "text" }, note) : null, h("label", { class: "field" }, "Workspace", select)), [
       btn("Cancel", null, () => { closeDialog(); resolve(null); }, "tool outline"),
-      btn("Next", null, () => { closeDialog(); resolve(workspaces.find((w) => w.id === select.value)); }, "tool primary"),
+      btn(okLabel, null, () => { closeDialog(); resolve(workspaces.find((w) => w.id === select.value)); }, "tool primary"),
     ]);
   });
 }
@@ -1280,7 +1283,7 @@ function loadIntoState(nb) {
   disposeEditors();
   state.variables = null;
   state.notebook = { name: nb.name, cells: nb.cells.map(cellFrom), lakehouse: nb.lakehouse || null, dirty: false,
-    compute: nb.compute || "default", check: nb.check || null };
+    compute: nb.compute || "default", workspace: nb.workspace || null, check: nb.check || null };
   if (!state.notebook.cells.length) state.notebook.cells.push(cellFrom({ type: "code" }));
   state.notebook.cells.forEach((c) => { if (c.type === "markdown" && c.source) c.editing = false; });
   state.selected = state.notebook.cells[0].id;
@@ -1313,7 +1316,7 @@ async function newNotebook(lakehouse) {
 
 function notebookPayload() {
   return { name: state.notebook.name, cells: state.notebook.cells.map((c) => ({ type: c.type, source: c.source, meta: c.meta })),
-    lakehouse_ref: state.notebook.lakehouse, compute: state.notebook.compute };
+    lakehouse_ref: state.notebook.lakehouse, compute: state.notebook.compute, workspace: state.notebook.workspace };
 }
 
 async function saveNotebook() {
@@ -1345,19 +1348,55 @@ async function renameNotebook() {
   if (ok) { nb.name = name; renderChrome(); }
 }
 
+// ---------- Publish to OneLake ----------
+
+// Each notebook remembers the workspace it is published to (saved in the .ipynb). The first
+// Publish asks for it, starting from the attached lakehouse's workspace; later ones reuse it.
+// Run in Fabric and schedules use the same workspace.
+function publishWorkspace(nb) {
+  if (nb?.workspace?.workspace_id) return nb.workspace;
+  if (nb?.lakehouse) return { workspace_id: nb.lakehouse.workspace_id, workspace_name: nb.lakehouse.workspace_name };
+  return null;
+}
+
+function publishWorkspaceName(nb) {
+  return publishWorkspace(nb)?.workspace_name || "the workspace";
+}
+
+async function chooseNotebookWorkspace(nb, okLabel = "Save") {
+  const workspaces = await loadWorkspaces();
+  if (!workspaces.length) return null;
+  const current = publishWorkspace(nb);
+  const lh = nb.lakehouse ? ` Its lakehouse, ${nb.lakehouse.name}, stays attached wherever it is published.` : "";
+  const ws = await pickWorkspace(workspaces, { title: `Publish ${nb.name} to`, selected: current?.workspace_id, okLabel,
+    note: `The notebook is created or updated as a Fabric notebook item in this workspace. Publish, Run in Fabric and schedules keep using it until you change it here.${lh}` });
+  if (!ws || state.notebook !== nb) return null;
+  nb.workspace = { workspace_id: ws.id, workspace_name: ws.displayName };
+  await saveNotebook();
+  if (state.view === "notebook") renderNotebook();
+  return nb.workspace;
+}
+
+function publishMenu(nb) {
+  const ws = nb.workspace?.workspace_id ? nb.workspace.workspace_name : null;
+  return [
+    { info: ws ? `Publishes to ${ws}.` : "Publish asks which workspace to use the first time." },
+    { label: ws ? `Publish to ${ws}` : "Publish...", icon: "publish", action: publishNotebook },
+    { label: "Change workspace...", icon: "folder", action: () => ensureSignedIn().then((ok) => ok && chooseNotebookWorkspace(nb)) },
+  ];
+}
+
 async function publishNotebook() {
   const nb = state.notebook;
-  if (!nb.lakehouse) {
-    toast("Attach a lakehouse first. The notebook is published to that lakehouse's workspace.", true);
-    return;
-  }
   if (!(await ensureSignedIn())) return;
-  toast(`Publishing ${nb.name} to ${nb.lakehouse.workspace_name}...`);
+  if (!nb.workspace?.workspace_id && !(await chooseNotebookWorkspace(nb, "Publish"))) return;
+  const ws = nb.workspace.workspace_name;
+  toast(`Publishing ${nb.name} to ${ws}...`);
   const result = await attempt(() => rpc("publish_notebook", notebookPayload()), "Publish failed");
   if (result) {
     nb.dirty = false;
     renderChrome();
-    toast(`Published ${nb.name} to ${nb.lakehouse.workspace_name} as a Fabric notebook item.`);
+    toast(`Published ${nb.name} to ${ws} as a Fabric notebook item.`);
   }
 }
 
@@ -1368,7 +1407,7 @@ async function publishNotebook() {
 // runs the whole published notebook, so single cells only run on this PC.
 function nbWhere(nb) {
   const choice = nb?.compute || "default";
-  const ws = nb?.lakehouse?.workspace_name;
+  const ws = nb?.lakehouse ? publishWorkspace(nb).workspace_name : null;
   const envFabric = envWhere(state.meta?.project, state.meta?.env).fabric;
   const fabric = choice === "fabric" || (choice === "default" && envFabric);
   const short = fabric ? (ws ? `Fabric · ${ws}` : "Fabric") : "This PC";
@@ -1383,7 +1422,7 @@ function computeMenu(nb) {
   return [
     { info: "Where Run all runs this notebook." },
     option("local", "This PC (no Fabric capacity used)", "desktop"),
-    option("fabric", `Fabric${nb.lakehouse ? ` (${nb.lakehouse.workspace_name})` : " (attach a lakehouse first)"}`, "cloud"),
+    option("fabric", `Fabric${nb.lakehouse ? ` (${publishWorkspaceName(nb)})` : " (attach a lakehouse first)"}`, "cloud"),
     option("default", `Same as ${env} (${where.envFabric ? "Fabric" : "this PC"})`, "sync"),
     { info: `Python ${state.python || "3"} on this PC. Fabric runs publish the notebook first.` },
     { label: "Restart kernel", icon: "restart", action: restartKernel },
@@ -1436,7 +1475,7 @@ function computeNote(nb) {
   } else if (where.fabric) {
     const run = nb.fabricRun;
     slot.append(h("div", { class: "callout compute-callout" }, icon("cloud", 18),
-      h("span", { class: "grow" }, `Run all publishes this notebook and runs it on ${nb.lakehouse?.workspace_name || "the workspace"}'s Fabric capacity. `,
+      h("span", { class: "grow" }, `Run all publishes this notebook and runs it on ${publishWorkspaceName(nb)}'s Fabric capacity. `,
         "Cell output shows in Fabric, and the bell tells you when it finishes."),
       run ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); openInFabric(run.url); } },
         `Last run: ${run.status === "NotStarted" ? "starting" : run.status}`) : null));
@@ -1457,7 +1496,7 @@ async function runInFabric() {
     return;
   }
   if (!(await ensureSignedIn())) return;
-  toast(`Publishing ${nb.name} and starting it in ${nb.lakehouse.workspace_name}...`);
+  toast(`Publishing ${nb.name} and starting it in ${publishWorkspaceName(nb)}...`);
   const run = await attempt(() => rpc("run_notebook_in_fabric", notebookPayload()), "Could not start the run in Fabric");
   if (!run) return;
   nb.dirty = false;
@@ -1465,7 +1504,7 @@ async function runInFabric() {
   renderChrome();
   if (state.view === "notebook") renderNotebook();
   toast(`${nb.name} is running in Fabric. The bell follows it until it finishes.`);
-  logActivity({ id: `fabric:${run.job_id}`, status: "running", title: `${nb.name} · Notebook run`, text: `In Fabric on ${nb.lakehouse.workspace_name}`, url: run.url, monitor: true });
+  logActivity({ id: `fabric:${run.job_id}`, status: "running", title: `${nb.name} · Notebook run`, text: `In Fabric on ${run.workspace_name || publishWorkspaceName(nb)}`, url: run.url, monitor: true });
   trackFabricJobs();
   watchFabricRun(nb, run);
 }
@@ -1536,7 +1575,7 @@ async function scheduleNotebook() {
       h("td", {}, s.enabled ? h("span", { class: "pill-s pass" }, "On") : h("span", { class: "pill-s neu" }, "Off")),
       h("td", {}, s.text),
       h("td", { class: "n" }, btn("Remove", "delete", async () => {
-        const next = await attempt(() => rpc("delete_notebook_schedule", { name: nb.name, lakehouse_ref: nb.lakehouse, schedule_id: s.id }), "Not removed");
+        const next = await attempt(() => rpc("delete_notebook_schedule", { name: nb.name, lakehouse_ref: nb.lakehouse, workspace: nb.workspace, schedule_id: s.id }), "Not removed");
         if (next) show(next);
       }, "tool link small"))))))
       : h("p", { class: "muted-text" }, res.published ? "No schedules yet." : "Not published yet. Adding a schedule publishes it."));
@@ -1548,11 +1587,11 @@ async function scheduleNotebook() {
     if (res) { nb.dirty = false; renderChrome(); show(res); toast("Scheduled. Fabric runs the published notebook on its own capacity."); }
   };
   showDialog(`Schedule ${nb.name} in Fabric`, h("div", { class: "scroll" },
-    h("p", { class: "text" }, `Fabric runs the published notebook in ${nb.lakehouse.workspace_name} on its own capacity, even when this PC is off. Adding a schedule publishes what is on screen first.`),
+    h("p", { class: "text" }, `Fabric runs the published notebook in ${publishWorkspaceName(nb)} on its own capacity, even when this PC is off. Adding a schedule publishes what is on screen first.`),
     list, h("b", {}, "Add a schedule"), form.fields),
   [btn("Close", null, closeDialog, "tool outline"), btn("Add schedule", "add", add, "tool primary")]);
   form.sync();
-  const res = await attempt(() => rpc("notebook_schedules", { name: nb.name, lakehouse_ref: nb.lakehouse }), "Could not read schedules");
+  const res = await attempt(() => rpc("notebook_schedules", { name: nb.name, lakehouse_ref: nb.lakehouse, workspace: nb.workspace }), "Could not read schedules");
   if (res) show(res);
 }
 

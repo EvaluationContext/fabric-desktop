@@ -196,8 +196,8 @@ def compute_check(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None)
             fabric.append({"cell": n, "text": "reads or writes a path on this PC, which Fabric can't reach",
                            "code": _snippet(source, m)})
     if not lakehouse:
-        fabric.insert(0, {"cell": None, "text": "has no lakehouse attached. A Fabric run happens in the attached "
-                                                "lakehouse's workspace.", "code": ""})
+        fabric.insert(0, {"cell": None, "text": "has no lakehouse attached. A Fabric run reads and writes "
+                                                "through the attached lakehouse.", "code": ""})
     return {"local": {"ok": not local, "reasons": local}, "fabric": {"ok": not fabric, "reasons": fabric}}
 
 

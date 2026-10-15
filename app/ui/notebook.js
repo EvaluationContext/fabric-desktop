@@ -81,7 +81,10 @@ function renderNotebook() {
     home: [runAllBtn, cancelBtn, computeBtn, h("div", { class: "sep" }), btn("Add data items", "lakehouse", openDataItems),
       h("div", { class: "spacer" }), btn("Save", "save", saveNotebook),
       btn("Schedule", "history", scheduleNotebook, "tool"),
-      btn("Publish to OneLake", "publish", publishNotebook, "tool primary")],
+      h("div", { class: "split" }, btn("Publish to OneLake", "publish", publishNotebook, "tool primary",
+        { title: nb.workspace?.workspace_id ? `Publish to ${nb.workspace.workspace_name}` : "Publish to a Fabric workspace you pick" }),
+      h("button", { class: "tool primary split-more", "aria-label": "Publish options", title: "Publish options",
+        onclick: (e) => showMenu(e.currentTarget, publishMenu(nb)) }, icon("chevronDown", 14)))],
     edit: [btn("Code", "add", () => addCell("code")), btn("Markdown", "add", () => addCell("markdown")),
       h("div", { class: "sep" }), btn("Move up", "up", () => moveCell(-1)), btn("Move down", "down", () => moveCell(1)),
       btn("Split cell", "code", () => splitCell(sel)), btn("Merge with below", "down", () => mergeBelow(sel)),
@@ -127,7 +130,7 @@ function renderNotebook() {
       h("span", {}, h("span", { class: `dot ${state.kernel}` }), kernelLabel()),
       h("span", { class: "mode-hint" }, modeHint()),
       h("span", {}, `Attached: ${lh ? lh.name : "none"}`),
-      h("span", {}, fabricMode ? `Compute: Fabric capacity in ${nb.lakehouse?.workspace_name || "the attached lakehouse's workspace"}`
+      h("span", {}, fabricMode ? `Compute: Fabric capacity in ${publishWorkspaceName(nb)}`
         : `Compute: Python ${state.python || "3"} on this PC, no Fabric capacity used`),
       nb.fabricRun ? h("span", {}, `Last Fabric run: ${nb.fabricRun.status === "NotStarted" ? "starting" : nb.fabricRun.status}`) : null));
   document.querySelector(".cells").scrollTop = scrollTop;

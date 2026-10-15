@@ -50,7 +50,7 @@ def test_ipynb_round_trip_keeps_cells_and_lakehouse():
     cells = [{"type": "markdown", "source": "# Sales\nby region"}, {"type": "code", "source": "x = 1\nx"}]
     nb = json.loads(json.dumps(to_ipynb(cells, LH)))
     assert nb["metadata"]["dependencies"]["lakehouse"]["default_lakehouse"] == "lh1"
-    assert from_ipynb(nb) == {"cells": cells, "lakehouse": LH, "compute": "default"}
+    assert from_ipynb(nb) == {"cells": cells, "lakehouse": LH, "compute": "default", "workspace": None}
 
 
 def test_notebook_keeps_where_it_runs_until_changed(tmp_path):
