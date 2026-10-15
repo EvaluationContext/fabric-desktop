@@ -167,7 +167,8 @@ class OneLakeStore(Store):
 
     def _lakehouse_id(self, lakehouse: str) -> str:
         if lakehouse not in self.lakehouse_ids:
-            raise LookupError(f"{lakehouse} doesn't exist in the {self.env} workspace yet; promote to create it")
+            how = "run Dev to create it" if self.env == "dev" else "promote to create it"
+            raise LookupError(f"{lakehouse} doesn't exist in the {self.env} workspace yet; {how}")
         return self.lakehouse_ids[lakehouse]
 
     def uri(self, lakehouse: str, schema: str, table: str) -> str:

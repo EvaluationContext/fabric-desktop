@@ -381,6 +381,8 @@ h2.flush { margin: 0; }
 .dialog:has(.decision), .dialog:has(.mini) { max-width: 720px; }
 .env-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 .env-card .muted-text { overflow-wrap: anywhere; }
+.env-ws { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.env-ws .icon { color: var(--accent); flex: none; }
 .pass-box { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-dark); font-size: 13px; }
 .info-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 .info p { margin: 0; }
@@ -501,6 +503,7 @@ h2.flush { margin: 0; }
 .rel-cell { display: flex; flex-direction: column; gap: 2px; word-break: break-all; }
 .compute-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .compute-row .seg button { min-height: 28px; padding: 0 12px; }
+.env-card .compute-row > .muted-text { min-width: 56px; }
 .seg button:disabled { color: var(--muted, #888); cursor: not-allowed; }
 
 /* Status and activity: environment in the top bar, the activity tray, runs shown one way */

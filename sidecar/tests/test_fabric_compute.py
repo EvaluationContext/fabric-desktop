@@ -227,3 +227,26 @@ def test_runs_from_every_environment(svc, tmp_path, monkeypatch):
 def test_runs_from_every_environment_without_a_project(tmp_path):
     s = CloudService(root=tmp_path / "app")
     assert s.meta_runs_all() == {"runs": [], "unavailable": {}}
+
+
+def test_every_environment_keeps_a_workspace_and_can_run_on_this_pc(svc):
+    class Creating:
+        def create_workspace(self, name, capacity_id="", description=""):
+            assert capacity_id == "cap1"
+            return {"id": "ws-new", "displayName": name}
+    svc.fake = Creating()
+    res = svc.meta_create_workspace("dev", " Sales - Dev ", "cap1")
+    dev = res["environments"]["dev"]
+    assert res["created"]["displayName"] == "Sales - Dev"
+    # Assigning a workspace points the environment at it; this PC still runs it.
+    assert (dev["workspace_id"], dev["target"], dev.get("compute", "local")) == ("ws-new", "onelake", "local")
+    # Going offline keeps the workspace assigned and turns Fabric compute off.
+    svc.meta_set_environment("prod", "ws-prod", "Sales - Prod")
+    svc.meta_set_compute("prod", "fabric")
+    prod = svc.meta_set_environment("prod", target="local")["environments"]["prod"]
+    assert (prod["workspace_id"], prod["target"]) == ("ws-prod", "local") and "compute" not in prod
+    back = svc.meta_set_environment("prod", target="onelake")["environments"]["prod"]
+    assert (back["workspace_id"], back["target"]) == ("ws-prod", "onelake")
+    # Test has no workspace yet, so it can't point at one.
+    with pytest.raises(LookupError, match="Assign a workspace to Test"):
+        svc.meta_set_environment("test", target="onelake")

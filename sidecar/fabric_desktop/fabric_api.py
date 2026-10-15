@@ -79,6 +79,25 @@ class FabricClient:
     def list_workspaces(self) -> list[dict[str, Any]]:
         return self._paged("/workspaces")
 
+    def list_capacities(self) -> list[dict[str, Any]]:
+        """Capacities the signed-in user can assign workspaces to."""
+        return self._paged("/capacities")
+
+    def create_workspace(self, name: str, capacity_id: str = "", description: str = "") -> dict[str, Any]:
+        """Create a workspace as the signed-in user, on a capacity so it can hold lakehouses."""
+        body: dict[str, Any] = {"displayName": name}
+        if capacity_id:
+            body["capacityId"] = capacity_id
+        if description:
+            body["description"] = description
+        try:
+            return self._request("POST", "/workspaces", json=body).json()
+        except FabricError as exc:
+            if exc.code == "WorkspaceNameAlreadyExists":
+                raise FabricError(f"A workspace named {name} already exists. Pick it from the list, "
+                                  f"or use another name.", exc.code) from exc
+            raise
+
     def list_lakehouses(self, workspace_id: str) -> list[dict[str, Any]]:
         return self._paged(f"/workspaces/{workspace_id}/lakehouses")
 

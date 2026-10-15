@@ -81,6 +81,11 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin):
     def list_lakehouses(self, workspace_id: str) -> list[dict[str, Any]]:
         return self.fabric.list_lakehouses(workspace_id)
 
+    def list_capacities(self) -> list[dict[str, Any]]:
+        """Capacities a new workspace can go on, active ones first."""
+        caps = self.fabric.list_capacities()
+        return sorted(caps, key=lambda c: (c.get("state") != "Active", c.get("displayName", "").lower()))
+
     def catalog(self, all_types: bool = False) -> dict[str, Any]:
         """Every lakehouse (or, with all_types, every item) in every workspace the user can open.
 

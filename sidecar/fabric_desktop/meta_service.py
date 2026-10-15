@@ -100,7 +100,7 @@ class MetaMixin:
             return LocalStore(project.local_data / env, env)
         ws = cfg.get("workspace_id")
         if not ws:
-            raise LookupError(f"Pick a Fabric workspace for {env.title()} first (Metadata > Environments).")
+            raise LookupError(f"Assign a workspace to {env.title()} first (Metadata > Environments and promote).")
         fabric = self.fabric  # type: ignore[attr-defined]
         wanted = [l.lakehouse for l in project.layers] + [META_LAKEHOUSE]
         existing = {lh["displayName"]: lh["id"] for lh in fabric.list_lakehouses(ws)}
@@ -134,7 +134,9 @@ class MetaMixin:
         return any(keys_mod.entity_keys(e) for n, e in project.entities.items() if names is None or n in names)
 
     def _write_environments(self, project: Project, envs: dict[str, dict[str, Any]]) -> None:
-        lines = ["# Where each environment writes. Lakehouses LH_<Layer> are created on promote.",
+        lines = ["# Each environment's workspace, and where its tables live: target = \"onelake\" (the workspace's",
+                 "# lakehouses, LH_<Layer>, created when first needed) or \"local\" (offline, in .local).",
+                 "# compute = \"local\" runs on this PC, \"fabric\" on the workspace's capacity.",
                  "# keys_workspace_id is the workspace that holds LH_Keys, the surrogate keys.", ""]
         for name in ENVIRONMENTS:
             lines.append(f"[{name}]")
@@ -142,16 +144,45 @@ class MetaMixin:
             lines.append("")
         (project.root / "environments.toml").write_text("\n".join(lines), encoding="utf-8")
 
-    def meta_set_environment(self, env: str, workspace_id: str = "", workspace_name: str = "",
-                             target: str = "onelake") -> dict[str, Any]:
+    def meta_set_environment(self, env: str, workspace_id: str | None = None, workspace_name: str | None = None,
+                             target: str | None = None) -> dict[str, Any]:
+        """Assign an environment's workspace, and say where its tables live.
+
+        Every environment keeps its workspace, whichever computer runs it. ``target`` is
+        "onelake" (the workspace's lakehouses, read and written from this PC or Fabric) or
+        "local" (offline: Delta tables in the project's .local folder). Assigning a workspace
+        without a target points the environment at it."""
+        if env not in ENVIRONMENTS:
+            raise ValueError(f"environment must be one of {', '.join(ENVIRONMENTS)}")
+        if target not in (None, "local", "onelake"):
+            raise ValueError("target is onelake (the workspace) or local (this PC only)")
         project = self._project()
-        envs = dict(project.environments)
-        keep = {k: v for k, v in envs.get(env, {}).items()
-                if k.startswith("keys_") or k == "optimize_after_run" or (k == "compute" and target != "local")}
-        envs[env] = ({"target": "local"} if target == "local" else {
-            "target": "onelake", "workspace_id": workspace_id, "workspace_name": workspace_name}) | keep
+        envs = {k: dict(v) for k, v in project.environments.items()}
+        cfg = envs.setdefault(env, {})
+        if workspace_id is not None:
+            cfg["workspace_id"] = workspace_id
+            cfg["workspace_name"] = workspace_name or ""
+            target = target or ("onelake" if workspace_id else "local")
+        if target == "onelake" and not cfg.get("workspace_id"):
+            raise LookupError(f"Assign a workspace to {env.title()} first.")
+        if target:
+            cfg["target"] = target
+        if cfg.get("target", "onelake" if env != "dev" else "local") == "local":
+            cfg.pop("compute", None)  # Fabric can't reach tables on this PC
         self._write_environments(project, envs)
         return self.meta_project()
+
+    def meta_create_workspace(self, env: str, name: str, capacity_id: str = "") -> dict[str, Any]:
+        """Create a Fabric workspace with the user's own sign-in and assign it to the environment."""
+        if env not in ENVIRONMENTS:
+            raise ValueError(f"environment must be one of {', '.join(ENVIRONMENTS)}")
+        name = name.strip()
+        if not name:
+            raise ValueError("Give the workspace a name.")
+        ws = self.fabric.create_workspace(  # type: ignore[attr-defined]
+            name, capacity_id, f"{env.title()} environment, managed by Fabric Desktop's metadata framework")
+        return self.meta_set_environment(env, ws["id"], ws.get("displayName") or name) | {
+            "created": {"id": ws["id"], "displayName": ws.get("displayName") or name}}
 
     def meta_set_keys_workspace(self, env: str, workspace_id: str, workspace_name: str = "") -> dict[str, Any]:
         """Point an environment at the workspace that holds its LH_Keys."""
