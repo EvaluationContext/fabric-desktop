@@ -22,6 +22,7 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 | Document | What it covers |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | How the app, the sidecar and OneLake fit together |
+| [docs/permissions.md](docs/permissions.md) | Every Entra permission the app uses, in alphabetical order; setup steps; fixing admin consent errors; what the agent needs instead |
 | [docs/agent.md](docs/agent.md) | The headless agent: identity setup, `agent.toml`, installing on Linux (systemd or container) and Windows, operating it, and what to verify on your tenant |
 | [docs/enterprise-roadmap.md](docs/enterprise-roadmap.md) | The enterprise local execution assessment: feature inventory, gap analysis, architecture changes, roadmap milestones M0 to M6 and work items |
 | [deploy/agent.example.toml](deploy/agent.example.toml) | Every agent setting, with comments |
@@ -38,23 +39,15 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 
 ## One-time setup: Entra app registration
 
-1. In the Entra admin center, go to **App registrations > New registration**. Add a **Public client** redirect URI of `http://localhost`.
-2. Under **API permissions**, add these delegated permissions:
-   - Power BI Service (Fabric): `Workspace.ReadWrite.All`, `Item.ReadWrite.All` and `Item.Execute.All` (run or schedule notebooks and table maintenance in Fabric); also `OneLake.ReadWrite.All` (shortcuts and data access roles) and `Connection.Read.All` (cloud connections for shortcuts).
-   - Microsoft Graph: `User.ReadBasic.All` (find people when granting access).
-   - Azure Storage: `user_impersonation`.
-   - Azure Key Vault: `user_impersonation`, when you need it (notebooks read secrets with `notebookutils.credentials.getSecret` on this PC).
-   - Optional, Power BI Service `Tenant.Read.All` (admin-only; the app uses it when you are a Fabric admin and skips it otherwise).
+The desktop app signs in as you through your own Entra app registration. Every permission it needs, in alphabetical order, with step-by-step setup and the fix for "Could not grant admin consent ... does not have a subscription (or service principal)", is in **[docs/permissions.md](docs/permissions.md)**.
 
-   To avoid another consent prompt later, you can also add the permissions planned features will use:
-   - Power BI Service (Fabric): `Workspace.GitCommit.All` and `Workspace.GitUpdate.All` (Fabric Git), `Pipeline.ReadWrite.All` and `Pipeline.Deploy` (deployment pipelines), `Capacity.Read.All` (capacity size and state for cost), `Connection.ReadWrite.All` (create connections), `Gateway.Read.All`, `Report.Read.All` and `Dataset.ReadWrite.All` (report impact and model refresh).
-   - Microsoft Graph: `GroupMember.Read.All` (show who is in a group during access review; needs admin consent).
-   - Azure Service Management: `user_impersonation` (pause or resume an F-SKU capacity).
-   - Azure SQL Database: `user_impersonation` (query a SQL analytics endpoint or warehouse directly).
-3. Copy the Application (client) ID and set it for your user:
-   `setx FABRIC_DESKTOP_CLIENT_ID <client-id>`
+In short:
 
-Your tenant may require admin consent for these permissions.
+1. Register an app with the redirect URI `http://localhost` (Mobile and desktop applications).
+2. Make sure your tenant has a service principal for each API (Azure Storage, Microsoft Graph, Power BI Service, and any optional ones).
+3. Add the delegated permissions from the table, grant admin consent, and set the app's id for your user: `setx FABRIC_DESKTOP_CLIENT_ID <client-id>`.
+
+The headless agent needs no API permissions; it needs a Fabric tenant setting and workspace roles, listed on the same page.
 
 ## Run it
 

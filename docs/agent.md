@@ -51,6 +51,8 @@ You need:
 3. **Let service principals use Fabric.** In the Fabric admin portal, **Tenant settings > Developer settings > Service principals can use Fabric APIs**: enable it for a security group, and add the agent's app (or managed identity) to that group.
 4. **Add the identity to each workspace** it runs, as **Contributor** or higher: the environment's workspace (its layer lakehouses and `LH_Meta`) and, if the project uses surrogate keys, the Keys workspace (`LH_Keys`). It needs no Entra API permissions: an app identity gets what its workspace roles allow.
 
+The full list, in alphabetical order, is in [permissions.md](permissions.md#the-headless-agent).
+
 ## Configure
 
 Copy [deploy/agent.example.toml](../deploy/agent.example.toml) to:
