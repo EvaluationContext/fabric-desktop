@@ -1,0 +1,192 @@
+"""Metadata runs on Fabric capacity: the bundle, the runner notebook, and the app side."""
+
+import ast
+import json
+import types
+from pathlib import Path
+
+import pytest
+
+from fabric_desktop.fabric_compute import RUNNER, bundle_files, bundle_hash, run_bundle, run_parameters, runner_ipynb
+from fabric_desktop.meta import LocalStore, Project
+from fabric_desktop.meta.templates import init_project
+from test_cloud import CloudService, FakeFabric, FolderOneLake
+
+
+def write_bundle(files: dict, dest: Path) -> Path:
+    for rel, data in files.items():
+        p = dest / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return dest
+
+
+def test_bundle_has_the_engine_and_the_project_but_no_local_data(tmp_path):
+    init_project(tmp_path / "proj", "3", "Chris", True)
+    files = bundle_files(tmp_path / "proj", {"env": "test"})
+    assert "package/fabric_desktop/meta/engine.py" in files
+    assert "package/fabric_desktop/fabric_compute.py" in files
+    assert "project/layers.toml" in files and "project/metadata/entities/silver.orders.toml" in files
+    assert not any("/.local/" in p or "__pycache__" in p for p in files)
+    assert json.loads(files["config.json"]) == {"env": "test"}
+    assert bundle_hash(files) == bundle_hash(dict(files))
+    assert bundle_hash(files) != bundle_hash(files | {"config.json": b"{}"})
+
+
+def test_runner_notebook_is_a_parameterized_python_notebook():
+    nb = runner_ipynb("ws1", "lhmeta")
+    assert nb["metadata"]["kernel_info"]["name"] == "jupyter"
+    assert nb["metadata"]["dependencies"]["lakehouse"]["default_lakehouse"] == "lhmeta"
+    code = [c for c in nb["cells"] if c["cell_type"] == "code"]
+    assert code[0]["metadata"]["tags"] == ["parameters"]
+    for c in code:
+        ast.parse("".join(c["source"]))
+    assert "/lakehouse/default/Files/_fabric_desktop/current" in "".join(code[1]["source"])
+    params = run_parameters(["silver.orders"], "full", True, "fd-1")["parameters"]
+    assert params["entities"] == {"value": "silver.orders", "type": "string"}
+    assert params["cascade"] == {"value": True, "type": "bool"}
+
+
+def test_run_bundle_runs_the_same_engine_from_the_uploaded_copy(tmp_path):
+    proj = tmp_path / "proj"
+    init_project(proj, "3", "Chris", True)
+    bundle = write_bundle(bundle_files(proj, {"env": "dev"}), tmp_path / "bundle")
+    stores = (LocalStore(proj / ".local" / "dev", "dev"), LocalStore(proj / ".local" / "keys-dev", "dev"))
+    out = run_bundle(bundle, stores=stores, results_dir=tmp_path / "results", request_id="fd-1")
+    assert [r["status"] for r in out["results"]] == ["ok"] * 6
+    assert out["version"] == Project(proj).version  # the bundle is the same metadata version
+    saved = json.loads((tmp_path / "results" / "fd-1.json").read_text())
+    assert saved["results"][0]["entity"] == out["results"][0]["entity"]
+    out["raise_if_failed"]()
+    # One entity, by name; scheduled runs (no request id) get a dated file.
+    again = run_bundle(bundle, entities="gold.fact_sales", stores=stores, results_dir=tmp_path / "results")
+    assert [r["entity"] for r in again["results"]] == ["gold.fact_sales"]
+    assert again["request_id"].startswith("scheduled-")
+
+
+def test_failed_run_fails_the_fabric_job(tmp_path):
+    proj = tmp_path / "proj"
+    init_project(proj, "3", "Chris", True)
+    bundle = write_bundle(bundle_files(proj, {"env": "dev"}), tmp_path / "bundle")
+    empty = LocalStore(tmp_path / "nothing", "dev")  # no landing files, so bronze fails
+    out = run_bundle(bundle, entities="bronze.orders", stores=(empty, empty), results_dir=tmp_path / "r")
+    with pytest.raises(RuntimeError, match="bronze.orders"):
+        out["raise_if_failed"]()
+
+
+def test_environments_file_is_not_part_of_the_metadata_version(tmp_path):
+    proj = tmp_path / "proj"
+    p = init_project(proj, "3", "Chris", True)
+    before = p.version
+    (proj / "environments.toml").write_text('[test]\ncompute = "fabric"\n', encoding="utf-8")
+    assert Project(proj).version == before
+
+
+class FolderFiles:
+    """OneLake's Files area kept in a folder, standing in for FileStore."""
+    root: Path = None
+    uploads = 0
+
+    def __init__(self, token):
+        pass
+
+    def _p(self, ws, lh, path):
+        return FolderFiles.root / ws / lh / path
+
+    def delete(self, ws, lh, path):
+        import shutil
+        shutil.rmtree(self._p(ws, lh, path), ignore_errors=True)
+
+    def upload(self, ws, lh, path, data):
+        FolderFiles.uploads += 1
+        p = self._p(ws, lh, path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+
+    def read_bytes(self, ws, lh, path):
+        p = self._p(ws, lh, path)
+        return p.read_bytes() if p.exists() else None
+
+
+class ComputeFabric(FakeFabric):
+    def __init__(self):
+        super().__init__()
+        self.notebooks, self.jobs, self.schedules = [], [], []
+
+    def save_notebook(self, ws, name, ipynb):
+        self.notebooks.append((ws, name, json.loads(ipynb)))
+        return {"id": "runner1"}
+
+    def list_notebooks(self, ws):
+        return [{"id": "runner1", "displayName": RUNNER}] if self.notebooks else []
+
+    def run_item_job(self, ws, item, job_type, execution_data=None):
+        self.jobs.append((ws, item, job_type, execution_data))
+        return f"job{len(self.jobs)}"
+
+    def job_instance(self, ws, item, job):
+        return {"status": "Completed"}
+
+    def create_schedule(self, ws, item, job_type, config):
+        self.schedules.append({"id": "s1", "enabled": True, "configuration": config})
+
+    def list_schedules(self, ws, item, job_type):
+        return self.schedules
+
+
+@pytest.fixture
+def svc(tmp_path, monkeypatch):
+    s = CloudService(root=tmp_path / "app")
+    s.fake = ComputeFabric()
+    s._auth = types.SimpleNamespace(storage_token=lambda: "tok", silent_token=lambda scopes: "tok")
+    s.meta_init(str(tmp_path / "proj"), "3")
+    FolderFiles.root, FolderFiles.uploads = tmp_path / "files", 0
+    monkeypatch.setattr("fabric_desktop.cloud_service.FileStore", FolderFiles)
+    return s
+
+
+def test_compute_needs_tables_in_onelake(svc):
+    with pytest.raises(ValueError, match="keeps its tables on this PC"):
+        svc.meta_set_compute("dev", "fabric")
+    svc.meta_set_environment("test", "ws-test", "Sales - Test")
+    assert svc.meta_set_compute("test", "fabric")["environments"]["test"]["compute"] == "fabric"
+    # Pointing the environment back at this PC turns Fabric compute off with it.
+    svc.meta_set_environment("dev", target="local")
+    svc.meta_set_environment("test", target="local")
+    assert "compute" not in svc._project().environments["test"]
+
+
+def test_run_in_fabric_uploads_once_starts_the_runner_and_reads_results(svc, tmp_path, monkeypatch):
+    project = svc._project()
+    svc.meta_run()  # Dev on this PC, so there is something to promote
+    store = FolderOneLake(tmp_path / "onelake", "dev", [l.lakehouse for l in project.layers] + ["LH_Meta", "LH_Keys"])
+    monkeypatch.setattr(svc, "_store", lambda p, env, create=False: store)
+    monkeypatch.setattr(svc, "_keys_store", lambda p, env, create=False: store)
+    envs = {k: dict(v) for k, v in project.environments.items()}
+    envs["dev"] = {"target": "onelake", "workspace_id": "ws-test", "compute": "fabric"}
+    svc._write_environments(project, envs)
+
+    out = svc.meta_run(names=["silver.orders"], env="dev")
+    assert out[0]["status"] == "submitted" and out[0]["entity"] == "silver.orders"
+    ws, item, job_type, data = svc.fake.jobs[0]
+    assert (ws, item, job_type) == ("ws-test", "runner1", "RunNotebook")
+    assert data["parameters"]["entities"]["value"] == "silver.orders"
+    bundle = FolderFiles.root / "ws-test" / "id-LH_Meta" / "Files/_fabric_desktop/current"
+    config = json.loads((bundle / "config.json").read_text())
+    assert config["lakehouse_ids"]["LH_Gold"] == "id-LH_Gold" and config["keys_workspace_id"] == "ws-test"
+    first = FolderFiles.uploads
+    assert first > 20 and svc.fake.notebooks[0][1] == RUNNER
+
+    svc.meta_run(env="dev")  # nothing changed: no second upload or publish
+    assert FolderFiles.uploads == first and len(svc.fake.notebooks) == 1
+
+    # The runner saves its results; the app reads them once the job is done.
+    request_id = out[0]["request_id"]
+    results = FolderFiles.root / "ws-test" / "id-LH_Meta" / "Files/_fabric_desktop/results"
+    results.mkdir(parents=True)
+    (results / f"{request_id}.json").write_text(json.dumps({"results": [{"entity": "silver.orders", "status": "ok"}]}))
+    res = svc.meta_fabric_result(request_id)
+    assert res["status"] == "Completed" and res["results"][0]["status"] == "ok"
+
+    sched = svc.meta_add_schedule("dev", {"kind": "daily", "times": ["05:00"]})
+    assert sched["compute"] == "fabric" and sched["schedules"][0]["text"].startswith("Daily at 05:00")

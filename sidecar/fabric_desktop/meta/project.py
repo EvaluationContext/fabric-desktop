@@ -42,6 +42,9 @@ CUSTOM_RULES = ("owner", "custom_code_owner", "custom_code_test", "key_not_null"
 ENVIRONMENTS = ("dev", "test", "prod")
 _LAYER_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 _IGNORED = {".git", ".local", "__pycache__", ".pytest_cache"}
+# Where each environment writes and runs is deployment settings, not logic: changing it
+# mustn't make an environment look out of date and ask for another promote.
+_UNVERSIONED = {"environments.toml"}
 
 
 class GateError(Exception):
@@ -257,7 +260,8 @@ class Project:
         h = hashlib.sha1()
         for p in sorted(self.root.rglob("*")):
             rel = p.relative_to(self.root)
-            if p.is_file() and not (set(rel.parts) & _IGNORED) and p.suffix not in (".pyc",):
+            if p.is_file() and not (set(rel.parts) & _IGNORED) and p.suffix not in (".pyc",) \
+                    and rel.as_posix() not in _UNVERSIONED:
                 h.update(rel.as_posix().encode() + b"\0" + p.read_bytes().replace(b"\r\n", b"\n"))
         return h.hexdigest()[:7]
 

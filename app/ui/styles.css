@@ -491,3 +491,6 @@ h2.flush { margin: 0; }
 .dialog.wide .mini td { vertical-align: middle; }
 .dialog.wide { max-width: 1180px; }
 .rel-cell { display: flex; flex-direction: column; gap: 2px; word-break: break-all; }
+.compute-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.compute-row .seg button { min-height: 28px; padding: 0 12px; }
+.seg button:disabled { color: var(--muted, #888); cursor: not-allowed; }

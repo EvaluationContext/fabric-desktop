@@ -146,7 +146,8 @@ class MetaMixin:
                              target: str = "onelake") -> dict[str, Any]:
         project = self._project()
         envs = dict(project.environments)
-        keep = {k: v for k, v in envs.get(env, {}).items() if k.startswith("keys_") or k == "optimize_after_run"}
+        keep = {k: v for k, v in envs.get(env, {}).items()
+                if k.startswith("keys_") or k == "optimize_after_run" or (k == "compute" and target != "local")}
         envs[env] = ({"target": "local"} if target == "local" else {
             "target": "onelake", "workspace_id": workspace_id, "workspace_name": workspace_name}) | keep
         self._write_environments(project, envs)
@@ -261,6 +262,9 @@ class MetaMixin:
     def meta_run(self, names: list[str] | None = None, env: str = "dev", backfill: str | None = None,
                  cascade: bool = False) -> list[dict[str, Any]]:
         project = self._project()
+        if self._compute(project, env) == "fabric":  # type: ignore[attr-defined]
+            store = self._store(project, env, create=env == "dev")
+            return self._run_in_fabric(project, env, store, names, backfill, cascade)  # type: ignore[attr-defined]
         keys_store = self._keys_store(project, env, create=env == "dev") if self._uses_keys(project, names) else None
         store = self._store(project, env, create=env == "dev")
         engine = Engine(project, store, keys_store=keys_store)
@@ -323,6 +327,12 @@ class MetaMixin:
         if keys_store is not None:
             # Each environment issues its own keys; promote copies the source systems and seeds new key tables.
             result["keys"] = keys_mod.sync(project, keys_store)
+        if self._compute(project, target) == "fabric":  # type: ignore[attr-defined]
+            try:  # so scheduled runs in Fabric pick up the promoted version
+                self._fabric_bundle(project, target, target_store)  # type: ignore[attr-defined]
+                result["fabric"] = "synced"
+            except Exception as exc:  # the promote itself worked; the next run uploads again
+                result["fabric"] = f"not synced: {exc}"
         return result
 
     # ---- surrogate keys and source systems

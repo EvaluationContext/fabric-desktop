@@ -137,6 +137,14 @@ When a table's logic changes, an incremental run stops and asks: apply to new ro
 
 Where custom logic goes, simplest first: an expression (`[[derive]]` or a `[[check]]` with `expr`), a hook (`[hooks] after_clean` or `before_write`, a `(df, ctx)` function that declares the tables it `reads` and the columns it `adds`), a custom check (`[[check]] python = ...`), or a custom step (`[step] custom = ...`) that replaces one table's transform while the framework still checks and writes the result.
 
+### This PC or Fabric runs each environment
+
+Each environment card in **Metadata > Environments and promote** has **Runs on: This PC | Fabric**, so Dev, Test and Prod can each run in either place (`compute` in `environments.toml`). Fabric needs the environment's tables in OneLake, so a Dev that writes to `.local` runs on this PC until you point it at a workspace.
+
+With Fabric, **Run all** (and running one entity, backfills and rebuilds) uploads the metadata project and this app's engine to `LH_Meta/Files/_fabric_desktop/current` and starts one notebook in the workspace, `nb_fabric_desktop_runner`, a Fabric Python notebook that runs the same engine against the same lakehouses. The upload is skipped when nothing changed. The app follows the job and shows the results when it finishes; the run log, checks and quarantine land in the same `LH_Meta` tables, so **Runs**, promote and table health don't care where a run happened. The runner fails its Fabric job when a table fails, so Fabric's Monitoring hub shows it too. **Schedule** adds Fabric schedules that run every entity, even when this PC is off, from the project as it was last uploaded; promoting to an environment that runs in Fabric uploads the new version.
+
+Changing settings in `environments.toml` no longer changes the metadata version, so after updating to 0.6.0 promote each environment once to pick up the new version number.
+
 ### Profile, table health and the semantic model
 
 **Profile** on an entity's page reads what the entity reads, every row, on this PC, before any cleaning: nulls, distinct values, ranges and lengths, the most common values, and what looks wrong. It turns what it finds into rules the framework already runs: `[[clean]]` blocks to trim spaces, turn values like `N/A` into nulls, fold `Shipped`/`SHIPPED` into one case or parse dates stored as text, and `[[check]]` blocks for not null, unique, accepted values and ranges (warn by default, stop for the table's own key). Tick cleaning rules to see the rows they change before and after, then **Add to entity** appends the ticked blocks to the entity file through the save gate. Problems a rule already handles are marked as handled and not suggested again. **Profile its table instead** profiles what the entity wrote, for checks.
@@ -164,4 +172,4 @@ Relative paths in a job resolve from the job file's folder.
 
 ## Not yet built
 
-A bundled Python runtime and installer, pipelines, and running metadata runs on Fabric compute (Test and Prod runs execute on this PC and write to OneLake; published notebooks can run in Fabric). From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.
+A bundled Python runtime and installer, and pipelines. From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.
