@@ -11,9 +11,10 @@ from typing import Any
 import polars as pl
 
 from . import lakehouse
+from .meta import keys as keys_mod
 from .meta import Engine, GateError, Layer, LocalStore, OneLakeStore, Project, impact, promote
 from .meta.engine import RunResult
-from .meta.project import ENVIRONMENTS
+from .meta.project import ENVIRONMENTS, validate
 from .meta.promote import promote_checks
 from .meta.store import META_LAKEHOUSE, Store
 from .meta.templates import TEMPLATES, describe, entity_text, init_project
@@ -111,19 +112,56 @@ class MetaMixin:
         return OneLakeStore(env, ws, existing, lambda: self.auth.storage_token(),  # type: ignore[attr-defined]
                             self.root / "onelake-cache")
 
-    def meta_set_environment(self, env: str, workspace_id: str = "", workspace_name: str = "",
-                             target: str = "onelake") -> dict[str, Any]:
-        project = self._project()
-        lines = ["# Where each environment writes. Lakehouses LH_<Layer> are created on promote.", ""]
-        envs = dict(project.environments)
-        envs[env] = {"target": "local"} if target == "local" else {
-            "target": "onelake", "workspace_id": workspace_id, "workspace_name": workspace_name}
+    def _keys_store(self, project: Project, env: str, create: bool = False) -> Store:
+        """LH_Keys for an environment: on this PC for a local environment, else in its Keys workspace."""
+        if env not in ENVIRONMENTS:
+            raise ValueError(f"environment must be one of {', '.join(ENVIRONMENTS)}")
+        cfg = project.environments.get(env, {})
+        if cfg.get("target", "onelake" if env != "dev" else "local") == "local":
+            return LocalStore(project.local_data / f"keys-{env}", env)
+        ws = cfg.get("keys_workspace_id")
+        if not ws:
+            raise LookupError(f"Pick a Keys workspace for {env.title()} first (Metadata > Surrogate keys).")
+        fabric = self.fabric  # type: ignore[attr-defined]
+        existing = {lh["displayName"]: lh["id"] for lh in fabric.list_lakehouses(ws)}
+        if create and keys_mod.KEYS_LAKEHOUSE not in existing:
+            existing[keys_mod.KEYS_LAKEHOUSE] = fabric.create_lakehouse(
+                ws, keys_mod.KEYS_LAKEHOUSE, "Surrogate keys and source systems, managed by Fabric Desktop")["id"]
+        return OneLakeStore(env, ws, existing, lambda: self.auth.storage_token(),  # type: ignore[attr-defined]
+                            self.root / "onelake-cache")
+
+    def _uses_keys(self, project: Project, names: list[str] | None = None) -> bool:
+        return any(keys_mod.entity_keys(e) for n, e in project.entities.items() if names is None or n in names)
+
+    def _write_environments(self, project: Project, envs: dict[str, dict[str, Any]]) -> None:
+        lines = ["# Where each environment writes. Lakehouses LH_<Layer> are created on promote.",
+                 "# keys_workspace_id is the workspace that holds LH_Keys, the surrogate keys.", ""]
         for name in ENVIRONMENTS:
             lines.append(f"[{name}]")
             lines += [f"{k} = {json.dumps(v)}" for k, v in envs.get(name, {}).items()]
             lines.append("")
         (project.root / "environments.toml").write_text("\n".join(lines), encoding="utf-8")
+
+    def meta_set_environment(self, env: str, workspace_id: str = "", workspace_name: str = "",
+                             target: str = "onelake") -> dict[str, Any]:
+        project = self._project()
+        envs = dict(project.environments)
+        keep = {k: v for k, v in envs.get(env, {}).items() if k.startswith("keys_")}
+        envs[env] = ({"target": "local"} if target == "local" else {
+            "target": "onelake", "workspace_id": workspace_id, "workspace_name": workspace_name}) | keep
+        self._write_environments(project, envs)
         return self.meta_project()
+
+    def meta_set_keys_workspace(self, env: str, workspace_id: str, workspace_name: str = "") -> dict[str, Any]:
+        """Point an environment at the workspace that holds its LH_Keys."""
+        project = self._project()
+        if env not in ENVIRONMENTS:
+            raise ValueError(f"environment must be one of {', '.join(ENVIRONMENTS)}")
+        envs = dict(project.environments)
+        envs[env] = dict(envs.get(env, {})) | {"keys_workspace_id": workspace_id,
+                                               "keys_workspace_name": workspace_name}
+        self._write_environments(project, envs)
+        return self.meta_keys(env)
 
     # ---- entities
 
@@ -143,8 +181,11 @@ class MetaMixin:
         except Exception as exc:  # the config is still useful when the environment can't be read
             runs = [{"status": "unavailable", "message": str(exc)}]
         errors = [x for x in project.summary()["errors"] if x.startswith(name + ":")]
+        keys_sql = None
+        if keys_mod.entity_keys(e) and not errors and "entity" in e.spec.get("source", {}):
+            keys_sql = keys_mod.merge_sql(project, e, project.environments.get(env, {}).get("keys_workspace_name", ""))
         return e.summary() | {"text": e.path.read_text(encoding="utf-8"), "impact": impact(project, name),
-                              "runs": runs, "preview": preview, "errors": errors}
+                              "runs": runs, "preview": preview, "errors": errors, "keys_sql": keys_sql}
 
     def meta_save_entity(self, name: str, text: str) -> dict[str, Any]:
         """Save an entity file. TOML that doesn't parse is refused; other problems are listed."""
@@ -210,7 +251,8 @@ class MetaMixin:
         project = self._project()
         project.set_layers([Layer(name=l["name"].strip().lower(), drift=l.get("drift", "ignore_new"),
                                   required_checks=list(l.get("required_checks", [])),
-                                  reads_from=list(l.get("reads_from", [])), description=l.get("description", ""))
+                                  reads_from=list(l.get("reads_from", [])), description=l.get("description", ""),
+                                  require_keys=bool(l.get("require_keys", False)))
                             for l in layers])
         return self.meta_project()
 
@@ -219,7 +261,8 @@ class MetaMixin:
     def meta_run(self, names: list[str] | None = None, env: str = "dev", backfill: str | None = None,
                  cascade: bool = False) -> list[dict[str, Any]]:
         project = self._project()
-        engine = Engine(project, self._store(project, env, create=env == "dev"))
+        keys_store = self._keys_store(project, env, create=env == "dev") if self._uses_keys(project, names) else None
+        engine = Engine(project, self._store(project, env, create=env == "dev"), keys_store=keys_store)
         if cascade and names and len(names) == 1:
             results: list[RunResult] = engine.backfill(names[0])
         else:
@@ -258,6 +301,10 @@ class MetaMixin:
             errors = promote_checks(project, self._store(project, source), target, dt.date.today())
         except LookupError as exc:
             errors = [str(exc)]
+        cfg = project.environments.get(target, {})
+        if (project.key_tables or project.source_systems) and cfg.get("target", "onelake") != "local" \
+                and not cfg.get("keys_workspace_id"):
+            errors.append(f"Pick a Keys workspace for {target.title()} first (Metadata > Surrogate keys)")
         return {"source": source, "target": target, "version": project.version, "errors": errors}
 
     def meta_promote(self, source: str, target: str) -> dict[str, Any]:
@@ -266,4 +313,109 @@ class MetaMixin:
         errors = promote_checks(project, src, target, dt.date.today())
         if errors:
             raise GateError("promote", errors)
-        return promote(project, src, self._store(project, target, create=True), dt.date.today())
+        target_store = self._store(project, target, create=True)
+        uses_keys = bool(project.key_tables or project.source_systems)
+        keys_store = self._keys_store(project, target, create=True) if uses_keys else None  # fails before promoting
+        result = promote(project, src, target_store, dt.date.today())
+        if keys_store is not None:
+            # Each environment issues its own keys; promote copies the source systems and seeds new key tables.
+            result["keys"] = keys_mod.sync(project, keys_store)
+        return result
+
+    # ---- surrogate keys and source systems
+
+    def meta_keys(self, env: str = "dev") -> dict[str, Any]:
+        project = self._project()
+        summary = project.summary()
+        cfg = project.environments.get(env, {})
+        local = cfg.get("target", "onelake" if env != "dev" else "local") == "local"
+        tables, problem = summary["key_tables"], None
+        try:
+            store = self._keys_store(project, env)
+            tables = [t | keys_mod.key_stats(store, project.key_tables[t["name"]]) for t in tables]
+        except Exception as exc:  # the definitions are still useful when LH_Keys can't be read
+            problem = str(exc)
+        return {"env": env, "local": local, "path": str(project.local_data / f"keys-{env}") if local else None,
+                "workspace_id": cfg.get("keys_workspace_id", ""), "workspace_name": cfg.get("keys_workspace_name", ""),
+                "lakehouse": keys_mod.KEYS_LAKEHOUSE, "key_tables": tables,
+                "source_systems": summary["source_systems"], "system_types": list(keys_mod.SYSTEM_TYPES),
+                "connection_fields": list(keys_mod.CONNECTION_FIELDS), "problem": problem,
+                "errors": [x for x in summary["errors"] if x.startswith(("keys/", "source system"))]}
+
+    def meta_new_key_table(self, name: str, description: str = "", env: str = "dev") -> dict[str, Any]:
+        project = self._project()
+        name = name.strip().lower()
+        if name in project.key_tables:
+            raise ValueError(f"key table {name} already exists")
+        owner = ""
+        try:
+            owner = self.auth.signed_in_user() or ""  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        keys_mod.write_key_table(project.root, name, owner, description)
+        return self.meta_keys(env)
+
+    def meta_delete_key_table(self, name: str, env: str = "dev") -> dict[str, Any]:
+        project = self._project()
+        users = [e.name for e in project.entities.values() if name in [k["table"] for k in keys_mod.entity_keys(e)]]
+        if users:
+            raise GateError("save", [f"can't delete key table {name}: {', '.join(users)} use it"])
+        project.key_tables[name].path.unlink()
+        return self.meta_keys(env)
+
+    def meta_key_lookup(self, table: str, value: str, env: str = "dev") -> dict[str, Any] | None:
+        project = self._project()
+        return keys_mod.lookup(self._keys_store(project, env), project.key_tables[table], value)
+
+    def meta_save_source_system(self, system: dict[str, Any], original_id: int | None = None,
+                                env: str = "dev") -> dict[str, Any]:
+        project = self._project()
+        new = keys_mod.source_system_from_dict(system)
+        # original_id is the id being edited; without it this is a new source system.
+        others = [s for s in project.source_systems if original_id is None or s.id != int(original_id)]
+        if original_id is not None and new.id != int(original_id):
+            raise ValueError("A source system's id never changes once it is saved")
+        if any(s.id == new.id for s in others):
+            raise ValueError(f"id {new.id} is already used by another source system")
+        if any(s.code.upper() == new.code.upper() for s in others):
+            raise ValueError(f"code {new.code} is already used by another source system")
+        path = keys_mod.keys_dir(project.root) / keys_mod.SOURCE_SYSTEMS_FILE
+        old = path.read_text(encoding="utf-8") if path.exists() else None
+        keys_mod.write_source_systems(project.root, others + [new])
+        project.reload()
+        problems = [x for x in keys_mod.validate_keys(project) if x.startswith(("source system", "keys/source"))]
+        if problems:
+            if old is None:
+                path.unlink()
+            else:
+                path.write_text(old, encoding="utf-8")
+            raise GateError("save", problems)
+        return self.meta_keys(env)
+
+    def meta_delete_source_system(self, id: int, env: str = "dev") -> dict[str, Any]:
+        project = self._project()
+        keys_mod.write_source_systems(project.root, [s for s in project.source_systems if s.id != int(id)])
+        return self.meta_keys(env)
+
+    def meta_keys_sync(self, env: str = "dev") -> dict[str, Any]:
+        """Write the source system tables and create any missing key tables in the environment's LH_Keys."""
+        project = self._project()
+        errors = [x for x in validate(project, dt.date.today()) if x.startswith(("keys/", "source system"))]
+        if errors:
+            raise GateError("save", errors)
+        return keys_mod.sync(project, self._keys_store(project, env, create=True))
+
+    def meta_key_notebook(self, name: str, env: str = "dev") -> dict[str, Any]:
+        """A template notebook for the entity whose first cell is the surrogate key MERGE."""
+        project = self._project()
+        e = project.entities[name]
+        errors = [x for x in validate(project, dt.date.today()) if x.startswith(name + ":")]
+        if errors:
+            raise GateError("save", errors)
+        if not keys_mod.entity_keys(e):
+            raise ValueError(f"{name} has no [[keys]] block, so there is no key MERGE to start its notebook with")
+        src = project.entities[e.spec["source"]["entity"]]
+        nb_name = f"nb_{src.layer}_to_{e.layer}_{e.table}"
+        cells = keys_mod.template_cells(project, e, project.environments.get(env, {}).get("keys_workspace_name", ""))
+        self.notebooks.save(nb_name, cells)  # type: ignore[attr-defined]
+        return {"name": nb_name}

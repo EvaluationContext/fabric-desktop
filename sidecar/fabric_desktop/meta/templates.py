@@ -9,6 +9,7 @@ from typing import Any
 
 import polars as pl
 
+from . import keys as keys_mod
 from .project import Layer, Project, write_layers_file
 
 PRESETS: dict[str, list[Layer]] = {
@@ -43,6 +44,7 @@ through the same steps, checks it, and writes it to its layer's lakehouse.
 | --- | --- |
 | `layers.toml` | Your layers, in order. Each one is its own lakehouse, `LH_<Layer>`. |
 | `metadata/entities/` | One TOML file per table: source, contract, cleaning, checks, load mode. |
+| `metadata/keys/` | One file per business key (its key table in LH_Keys), and `source_systems.toml`. |
 | `transforms/` | Your Python: hooks, custom checks and custom steps. Shared helpers go in `common.py`. |
 | `tests/` | Tests for your Python. Every hook and custom step must point at one. |
 | `exceptions.toml` | Approved exceptions to a rule, each with a reason, an approver and an expiry. |
@@ -56,6 +58,16 @@ Where custom logic goes, simplest first:
    returns rows. Declare the tables it reads in `reads` and the columns it adds in `adds`.
 3. **Custom check**: `[[check]] python = "transforms.checks:valid_email"`, returns true per good row.
 4. **Custom step**: `[step] custom = "transforms.sales:build"` replaces the transform for one table.
+
+Surrogate keys come from one place, the LH_Keys lakehouse in each environment's Keys workspace. Each
+business key has its own key table, `sk.<name>`, with `<name>_sk` (INT), `<name>_bk` (unique) and
+`create_date`, so Customer ABC gets the same key from every source. A table takes its keys with:
+
+    [[keys]]
+    table = "customer"
+    business_key = "customer_id"
+
+Every run starts by MERGEing new business keys into the key table and putting the key on every row.
 
 Commit this folder to Git and review changes with pull requests.
 """
@@ -142,6 +154,11 @@ SAMPLE_ENTITIES = {
         not_null = true
         unique = true
         on_fail = "stop"
+
+        # Cell 1: every customer_id gets its customer_sk from LH_Keys.
+        [[keys]]
+        table = "customer"
+        business_key = "customer_id"
         """,
     "silver.orders": """\
         name = "silver.orders"
@@ -195,6 +212,15 @@ SAMPLE_ENTITIES = {
         name = "returns_are_negative"
         expr = "status <> 'returned' or amount < 0"
         on_fail = "quarantine"
+
+        [[keys]]
+        table = "order"
+        business_key = "order_id"
+
+        # A customer seen first on an order gets its key here, the same one silver.customers will find.
+        [[keys]]
+        table = "customer"
+        business_key = "customer_id"
         """,
     "gold.dim_customer": """\
         name = "gold.dim_customer"
@@ -337,6 +363,14 @@ def init_project(root: Path, preset: str = "3", owner: str = "", sample: bool = 
             _write(root, f"metadata/entities/{name}.toml", textwrap.dedent(text).format(owner=owner or "me"))
         for rel, text in SAMPLE_FILES.items():
             _write(root, f".local/dev/LH_Bronze/Files/{rel}", text)
+        keys_mod.write_key_table(root, "customer", owner or "me", "A customer, from any source")
+        keys_mod.write_key_table(root, "order", owner or "me", "A sales order")
+        keys_mod.write_source_systems(root, [
+            keys_mod.SourceSystem(1, "CRM", "Customer export", "Files", owner or "me",
+                                  connections={"dev": {"connection_type": "Files", "file_path": "landing/customers"}}),
+            keys_mod.SourceSystem(2, "SHOP", "Online shop export", "Files", owner or "me",
+                                  connections={"dev": {"connection_type": "Files", "file_path": "landing/orders"}}),
+        ])
     return Project(root)
 
 

@@ -104,9 +104,25 @@ Fabric Desktop is by [KratosBI](https://kratosbi.com). The KratosBI logo and app
 | `transforms/` | Your Python: hooks, custom checks and custom steps. Shared helpers go in `transforms/common.py`. |
 | `tests/` | Tests for your Python. Every hook and custom step must name one. |
 | `exceptions.toml` | Approved exceptions to a rule, each with a reason, an approver and an expiry. |
-| `environments.toml` | Where Dev, Test and Prod write. Dev writes Delta tables to the project's `.local` folder by default. |
+| `metadata/keys/<name>.toml` | One file per business key. Each is a key table `sk.<name>` in `LH_Keys`. |
+| `metadata/keys/source_systems.toml` | Every source system (fixed id and code) and its connection in Dev, Test and Prod. |
+| `environments.toml` | Where Dev, Test and Prod write, and the Keys workspace that holds each one's `LH_Keys`. Dev writes Delta tables to the project's `.local` folder by default. |
 
-Every run goes through the same steps: read, contract (schema drift and types), clean, derive, hooks, lookups, checks, write, log. Load modes are full, incremental (watermark plus merge on the key), Type 1 dimension and Type 2 dimension. Dimensions get integer surrogate keys that are never renumbered and an Unknown member at -1; facts look up the key that was current on the fact's date.
+Every run goes through the same steps: read, contract (schema drift and types), surrogate keys, clean, derive, hooks, lookups, checks, write, log. Load modes are full, incremental (watermark plus merge on the key), Type 1 dimension and Type 2 dimension. Dimensions get integer surrogate keys that are never renumbered and an Unknown member at -1; facts look up the key that was current on the fact's date.
+
+### Surrogate keys
+
+Surrogate keys are managed in one place: a lakehouse `LH_Keys` in a dedicated Keys workspace per environment (Dev keeps it on this PC). Each business key has its own key table, `sk.<name>`, with three columns: `<name>_sk` (INT), `<name>_bk` (the business key, unique) and `create_date`. Customer ABC gets one key, say 123, and every source that has Customer ABC maps to 123. A table takes its keys with a `[[keys]]` block:
+
+```toml
+[[keys]]
+table = "customer"
+business_key = "customer_id"     # or a list for a composite key, stored as "a||b"
+```
+
+The first step of every run MERGEs the business keys it hasn't seen yet into the key table (continuing from the highest key, never reusing one), then adds `customer_sk` to every row. Rows with no business key get -1. A Type 1 dimension whose rows already carry the key uses it instead of issuing its own. **Metadata > Surrogate keys** lists the key tables with their counts and looks up a business key; an entity's page shows the same MERGE in Spark SQL and **Create template notebook** saves a notebook whose first cell is that MERGE, for running in Fabric. Tick **Surrogate keys: Required** on a layer (for example Silver) to make every table in it use them.
+
+**Metadata > Source systems** keeps each source's id, code, type and owner, and its connection per environment: server, port, database, schema, base URL, file path, authentication, tenant, username, Key Vault URL and secret name, Fabric connection id, gateway and extra options. Passwords and keys never go in it. **Sync to LH_Keys** writes them to `config.source_system` and `config.source_connection` so notebooks and pipelines can look up connection values by code; promote does the same and creates any missing key table, but never copies keys between environments.
 
 Four gates keep the rules followed:
 
@@ -138,4 +154,4 @@ Relative paths in a job resolve from the job file's folder.
 
 ## Not yet built
 
-A bundled Python runtime and installer, scheduling, pipelines, and running published notebooks or metadata runs on Fabric compute (Test and Prod runs execute on this PC and write to OneLake). From the metadata plan: profiling with suggested cleaning rules, per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote.
+A bundled Python runtime and installer, scheduling, pipelines, and running published notebooks or metadata runs on Fabric compute (Test and Prod runs execute on this PC and write to OneLake). From the metadata plan: profiling with suggested cleaning rules, per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.

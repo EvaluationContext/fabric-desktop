@@ -1,14 +1,18 @@
-// Metadata framework screens: entities, layers, runs, environments and promote.
+// Metadata framework screens: entities, layers, surrogate keys, source systems, runs, environments and promote.
 // Every table is a file in the metadata project; these screens read and edit those files
 // through the sidecar, which also runs the gates and the engine.
 
 state.meta = {
   project: null,       // summary from meta_project
-  tab: "entities",     // entities | layers | runs | environments
+  tab: "entities",     // entities | layers | keys | sources | runs | environments
   env: "dev",
   entity: null,        // open entity detail
   layersDraft: null,   // unsaved layer edits
   runs: null,
+  keyTable: null,      // selected key table on the Surrogate keys tab
+  source: null,        // selected source system id, or "new"
+  sourceEnv: "dev",    // which environment's connection the form shows
+  sourceDraft: null,   // unsaved edits to the selected source system
 };
 
 const ENV_LABEL = { dev: "Dev", test: "Test", prod: "Prod" };
@@ -76,7 +80,8 @@ async function renderMetadata() {
   if (state.view !== "metadata" || !p) return;
   if (!p.path) return renderMetaSetup(p);
   const m = state.meta;
-  const tabs = [["entities", "Entities"], ["layers", "Layers"], ["runs", "Runs"], ["environments", "Environments and promote"]];
+  const tabs = [["entities", "Entities"], ["layers", "Layers"], ["keys", "Surrogate keys"], ["sources", "Source systems"],
+    ["runs", "Runs"], ["environments", "Environments and promote"]];
   const body = h("div", { class: "meta-body" });
   setView(h("div", { class: "page" },
     h("div", { class: "page-head" },
@@ -92,7 +97,8 @@ async function renderMetadata() {
     h("div", { class: "subtabs" }, tabs.map(([id, label]) =>
       h("button", { class: `tab${m.tab === id ? " active" : ""}`, onclick: () => goMeta(id) }, label))),
     body));
-  const render = { entities: renderEntitiesTab, layers: renderLayersTab, runs: renderRunsTab, environments: renderEnvTab }[m.tab];
+  const render = { entities: renderEntitiesTab, layers: renderLayersTab, keys: renderKeysTab, sources: renderSourcesTab,
+    runs: renderRunsTab, environments: renderEnvTab }[m.tab];
   await render(body, p);
 }
 
@@ -228,6 +234,7 @@ async function openEntity(name) {
 
 function stepsFor(e) {
   const steps = [["Read", "framework"], ["Contract", "framework"]];
+  if (e.surrogate_keys?.length) steps.push([`Surrogate keys · ${e.surrogate_keys.length}`, "framework"]);
   if (e.clean) steps.push([`Clean · ${e.clean}`, "framework"]);
   if (e.derive) steps.push([`Derive · ${e.derive}`, "expression"]);
   for (const c of e.custom) steps.push([c, "your code"]);
@@ -262,6 +269,7 @@ async function renderEntity() {
   const cols = Object.entries(e.columns).map(([c, t]) => h("div", { class: "col-row" },
     h("span", { class: "mono" }, c), h("span", { class: "muted-text mono" }, t),
     e.keys.includes(c) ? h("span", { class: "pill-s neu" }, "key") : null,
+    (e.surrogate_keys || []).some((k) => k.column === c) ? h("span", { class: "pill-s info" }, "LH_Keys") : null,
     e.derived.includes(c) ? h("span", { class: "pill-s pass" }, "derived") : null,
     e.hook_adds.includes(c) ? h("span", { class: "pill-s cus" }, "hook") : null));
 
@@ -303,7 +311,24 @@ async function renderEntity() {
             h("td", {}, statusPill(r.status)), h("td", {}, new Date(r.started_at).toLocaleString()),
             h("td", { class: "n" }, `${r.rows_written} rows`), h("td", { class: "n" }, `${r.seconds}s`)))))
             : h("p", { class: "muted-text" }, e.runs?.[0]?.message || "Not run yet.")))),
+    keysCard(e),
     e.preview ? h("div", { class: "card pad" }, h("b", {}, `Data in ${ENV_LABEL[state.meta.env]} · ${e.preview.total} rows`), dataTable(e.preview)) : null));
+}
+
+// The MERGE that starts this entity's template notebook.
+function keysCard(e) {
+  if (!e.surrogate_keys?.length) return null;
+  return h("div", { class: "card pad" },
+    h("div", { class: "row wrap" }, h("b", {}, "Cell 1: surrogate keys"),
+      h("span", { class: "muted-text" }, e.surrogate_keys.map((k) => `${k.column} from sk.${k.table} on ${k.business_key.join(" + ")}`).join(" · ")),
+      h("span", { class: "spacer" }),
+      e.keys_sql ? btn("Copy", null, () => attempt(() => navigator.clipboard.writeText(e.keys_sql), "Could not copy").then(() => toast("Copied")), "tool outline small") : null,
+      e.keys_sql ? btn("Create template notebook", "notebook", async () => {
+        const res = await metaCall("meta_key_notebook", { name: e.name, env: state.meta.env }, "No notebook created");
+        if (res) { toast(`Created ${res.name}`); openNotebook(res.name); }
+      }, "tool primary small") : null),
+    e.keys_sql ? h("pre", { class: "sql-block" }, e.keys_sql)
+      : h("p", { class: "muted-text" }, "Fix the problems above to see the MERGE."));
 }
 
 function confirmDialog(title, text, okLabel = "OK") {
@@ -399,7 +424,7 @@ function renderLayersTab(body, p) {
     h("div", { class: "flow" }, L.map((l, i) => [i ? h("span", { class: "arrow" }, "→") : null,
       h("span", { class: "layer-chip big", style: `background:${LAYER_COLORS[i % LAYER_COLORS.length]}` }, l.name)])),
     h("table", { class: "list" },
-      h("thead", {}, h("tr", {}, ["#", "Layer", "Lakehouse in each environment", "Can read from", "Schema drift", "Required checks", "Entities", ""].map((c) => h("th", {}, c)))),
+      h("thead", {}, h("tr", {}, ["#", "Layer", "Lakehouse in each environment", "Can read from", "Schema drift", "Required checks", "Surrogate keys", "Entities", ""].map((c) => h("th", {}, c)))),
       h("tbody", {}, L.map((l, i) => h("tr", {},
         h("td", {}, i + 1),
         h("td", {}, h("b", {}, l.name), l.description ? h("div", { class: "muted-text" }, l.description) : null),
@@ -414,6 +439,9 @@ function renderLayersTab(body, p) {
           h("input", { type: "checkbox", checked: l.required_checks.includes(c) ? true : null,
             onchange: (ev) => { l.required_checks = ev.target.checked ? [...new Set([...l.required_checks, c])] : l.required_checks.filter((x) => x !== c); rerender(); } }),
           c === "key_not_null" ? "Key not null" : "Key unique"))),
+        h("td", {}, h("label", { class: "check inline" },
+          h("input", { type: "checkbox", checked: l.require_keys ? true : null, onchange: (ev) => { l.require_keys = ev.target.checked; rerender(); } }),
+          "Required")),
         h("td", {}, counts[l.name] || h("span", { class: "muted-text" }, "none")),
         h("td", {}, h("span", { class: "row tight" },
           h("button", { class: "tool small", title: "Move up", onclick: () => move(i, -1) }, icon("up", 14)),
@@ -437,11 +465,13 @@ function renderLayersTab(body, p) {
     h("div", { class: "info-cards" },
       infoCard("No mixing", "A table writes only to its own layer's lakehouse. It reads from earlier layers, or from its own layer when that makes no loop, like a fact reading its dimensions. Reading a later layer is always rejected."),
       infoCard("Lakehouses are created for you", "Each layer is a schema-enabled lakehouse named LH_<Layer> in every environment. Dev keeps them on this PC; Test and Prod get them on the first promote."),
-      infoCard("Each layer has its own policy", "Schema drift and required checks are set per layer, so a lenient Bronze and a strict Gold can sit in one flow. Reordering is refused if a table would end up reading a later layer.")));
+      infoCard("Each layer has its own policy", "Schema drift and required checks are set per layer, so a lenient Bronze and a strict Gold can sit in one flow. Reordering is refused if a table would end up reading a later layer."),
+      infoCard("Surrogate keys can be required", "Tick Required on a layer, like silver, and every table in it must take its keys from LH_Keys with a [[keys]] block.")));
 }
 
 function stripLayer(l) {
-  return { name: l.name, drift: l.drift, required_checks: [...l.required_checks].sort(), reads_from: l.reads_from || [], description: l.description || "" };
+  return { name: l.name, drift: l.drift, required_checks: [...l.required_checks].sort(), reads_from: l.reads_from || [],
+    description: l.description || "", require_keys: !!l.require_keys };
 }
 
 function infoCard(title, text) {
@@ -502,6 +532,209 @@ async function setEnv(env, cfg) {
   closeDialog();
   const res = await metaCall("meta_set_environment", { env, ...cfg });
   if (res) { state.meta.project = res; render(); }
+}
+
+// ---------- surrogate keys ----------
+
+const CONNECTION_LABEL = {
+  connection_type: "Connection type", server_host: "Server or host", port: "Port", database_name: "Database or catalog",
+  schema_name: "Schema", base_url: "Base URL (APIs)", file_path: "File path or container", auth_method: "Authentication",
+  tenant_id: "Tenant id", username: "Username or client id", key_vault_url: "Key Vault URL", secret_name: "Secret name",
+  fabric_connection_id: "Fabric connection id", gateway_id: "Gateway", extra_options: "Extra options (JSON)",
+};
+const AUTH_METHODS = ["", "Entra ID (your sign-in)", "Service principal", "SQL login", "OAuth client", "API key", "None"];
+
+function keysWhere(k) {
+  if (k.local) return h("span", {}, "This PC, ", h("span", { class: "mono" }, k.path));
+  return k.workspace_name || k.workspace_id ? h("span", {}, "Workspace ", h("b", {}, k.workspace_name || k.workspace_id))
+    : h("span", { class: "muted-text" }, "No Keys workspace yet");
+}
+
+async function renderKeysTab(body) {
+  const m = state.meta;
+  const k = await metaCall("meta_keys", { env: m.env });
+  if (!k || state.view !== "metadata" || m.tab !== "keys") return;
+  const tables = k.key_tables;
+  if (!tables.find((t) => t.name === m.keyTable)) m.keyTable = tables[0]?.name || null;
+  const sel = tables.find((t) => t.name === m.keyTable);
+  const rerender = () => renderKeysTab(body);
+
+  const head = h("div", { class: "card pad" }, h("div", { class: "keys-head" },
+    h("span", { class: "item" }, icon("database", 24),
+      h("span", {}, h("b", {}, `${k.lakehouse} in ${ENV_LABEL[k.env]}`),
+        h("div", { class: "muted-text" }, "One table per business key. Every run MERGEs new business keys here first, then puts the key on every row."),
+        h("div", { class: "muted-text small" }, keysWhere(k)))),
+    k.local ? null : btn(k.workspace_id ? "Change Keys workspace" : "Pick Keys workspace", "workspace", () => pickKeysWorkspace(k.env), "tool outline small"),
+    btn("Sync to LH_Keys", "sync", async () => {
+      if (!k.local && !state.user && !(await signIn())) return;
+      const res = await metaCall("meta_keys_sync", { env: k.env }, "Not synced");
+      if (res) {
+        toast(`Synced: ${res.config.source_system} source systems${res.created.length ? `, created ${res.created.map((n) => `sk.${n}`).join(", ")}` : ""}`);
+        rerender();
+      }
+    }, "tool outline small"),
+    btn("New key table", "add", () => newKeyTableDialog(rerender), "tool primary small")));
+
+  const problems = [...k.errors, ...(k.problem ? [k.problem] : [])];
+  const list = tables.length ? h("table", { class: "list" },
+    h("thead", {}, h("tr", {}, ["Key table", "Surrogate key", "Business key", "Created", "Keys", "Next key", "Used by"].map((c) => h("th", {}, c)))),
+    h("tbody", {}, tables.map((t) => h("tr", { class: `click${t.name === m.keyTable ? " picked" : ""}`, onclick: () => { m.keyTable = t.name; rerender(); } },
+      h("td", {}, h("span", { class: "item" }, icon("table", 18), h("b", { class: "mono" }, t.table))),
+      h("td", { class: "mono" }, `${t.sk} INT`),
+      h("td", { class: "mono" }, t.bk),
+      h("td", { class: "mono" }, "create_date"),
+      h("td", { class: "n" }, t.created ? t.keys.toLocaleString() : h("span", { class: "muted-text" }, "not created")),
+      h("td", { class: "n mono" }, t.created ? t.next.toLocaleString() : "1"),
+      h("td", {}, t.used_by.length ? `${t.used_by.length} table${t.used_by.length === 1 ? "" : "s"}` : h("span", { class: "muted-text" }, "none"))))))
+    : h("div", { class: "empty" }, h("span", { class: "title" }, "No key tables yet"),
+      h("span", { class: "text" }, "Add one per business key, like customer or product. Each gets its own table in LH_Keys."),
+      btn("New key table", "add", () => newKeyTableDialog(rerender), "tool primary"));
+
+  body.replaceChildren(...[head,
+    problems.length ? h("div", { class: "problems" }, h("b", {}, "Fix these first"), gateList(problems)) : null,
+    h("div", { class: "keys-grid" }, list, sel ? keyTableDetail(sel, k, rerender) : null)].filter(Boolean));
+}
+
+function keyTableDetail(t, k, rerender) {
+  const input = h("input", { "aria-label": "Business key", placeholder: "Business key, like ABC" });
+  const answer = h("p", { class: "muted-text" });
+  const find = async () => {
+    if (!input.value.trim()) return;
+    const res = await metaCall("meta_key_lookup", { table: t.name, value: input.value, env: k.env });
+    if (res === undefined) return;
+    answer.replaceChildren(res ? h("span", {}, h("span", { class: "mono" }, res.bk), " is ", h("b", { class: "mono" }, String(res.sk)),
+      `, created ${new Date(res.create_date).toLocaleString()}.`) : `No ${t.bk} ${input.value.trim()} yet. The first run that sees it gives it a key.`);
+  };
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") find(); });
+  return h("div", { class: "card pad side-panel" },
+    h("div", { class: "row" }, h("h2", { class: "flush mono" }, t.table), h("span", { class: "spacer" }),
+      btn("Delete", "delete", async () => {
+        if (!(await confirmDialog(`Delete key table ${t.name}?`, "The definition file is removed. The table stays in LH_Keys, so no key is lost.", "Delete"))) return;
+        const res = await metaCall("meta_delete_key_table", { name: t.name, env: k.env }, "Not deleted");
+        if (res) { toast(`Deleted ${t.name}`); state.meta.keyTable = null; rerender(); }
+      }, "tool outline small", { disabled: t.used_by.length ? true : null, title: t.used_by.length ? "Tables still use it" : "Delete" })),
+    h("p", { class: "muted-text small" }, t.description || "", t.description ? " · " : "", "File ", h("span", { class: "mono" }, `metadata/keys/${t.name}.toml`),
+      t.owner ? `, owner ${t.owner}` : ""),
+    h("b", {}, "Attributes"),
+    h("table", { class: "mini" }, h("thead", {}, h("tr", {}, ["Column", "Type", "Rule"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, t.columns.map((c) => h("tr", {}, h("td", { class: "mono" }, c.name), h("td", { class: "mono" }, c.type), h("td", {}, c.rule))))),
+    h("p", { class: "muted-text small" }, "-1 is the Unknown member, for rows with no business key."),
+    h("b", {}, "Look up a business key"),
+    h("div", { class: "row" }, input, btn("Find", "search", find, "tool outline small")),
+    answer,
+    h("b", {}, "Used by"),
+    t.used_by.length ? h("div", { class: "row wrap" }, t.used_by.map((n) => h("button", { class: "tool link mono", onclick: () => openEntity(n) }, n)))
+      : h("p", { class: "muted-text" }, "No table uses it yet. Add this to an entity:"),
+    h("pre", { class: "sql-block" }, `[[keys]]\ntable = "${t.name}"\nbusiness_key = "${t.name}_id"`));
+}
+
+function newKeyTableDialog(done) {
+  const name = h("input", { placeholder: "customer" });
+  const description = h("input", { placeholder: "A customer, from any source" });
+  const preview = h("p", { class: "muted-text" });
+  const sync = () => {
+    const n = name.value.trim().toLowerCase() || "customer";
+    preview.textContent = `Creates sk.${n} in LH_Keys with ${n}_sk (INT), ${n}_bk (unique) and create_date.`;
+  };
+  name.addEventListener("input", sync);
+  sync();
+  showDialog("New key table", h("div", { class: "scroll" },
+    h("label", { class: "field" }, "Business key name", name),
+    h("label", { class: "field" }, "Description", description), preview), [
+    btn("Cancel", null, closeDialog, "tool outline"),
+    btn("Create", null, async () => {
+      if (!name.value.trim()) return toast("Give the key table a name", true);
+      const res = await metaCall("meta_new_key_table", { name: name.value.trim(), description: description.value.trim(), env: state.meta.env }, "Not created");
+      if (res) { closeDialog(); state.meta.keyTable = name.value.trim().toLowerCase(); toast(`Created sk.${state.meta.keyTable}`); done(); }
+    }, "tool primary"),
+  ]);
+}
+
+async function pickKeysWorkspace(env) {
+  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, state.user ? "Loading workspaces..." : "Sign in to pick a Fabric workspace."));
+  showDialog(`Keys workspace for ${ENV_LABEL[env]}`, list, [btn("Cancel", null, closeDialog, "tool outline")]);
+  if (!state.user && !(await signIn())) return;
+  const workspaces = await loadWorkspaces();
+  list.replaceChildren(h("p", { class: "muted-text" }, "LH_Keys is created in this workspace on the next sync or promote."),
+    ...workspaces.map((w) => h("button", { class: "choice", onclick: async () => {
+      closeDialog();
+      const res = await metaCall("meta_set_keys_workspace", { env, workspace_id: w.id, workspace_name: w.displayName });
+      if (res) render();
+    } }, icon("workspace", 20), h("span", { class: "main" }, h("span", { class: "n" }, w.displayName), h("span", { class: "w" }, "Holds LH_Keys")))));
+}
+
+// ---------- source systems ----------
+
+async function renderSourcesTab(body) {
+  const m = state.meta;
+  const k = await metaCall("meta_keys", { env: m.env });
+  if (!k || state.view !== "metadata" || m.tab !== "sources") return;
+  const systems = k.source_systems;
+  if (m.source !== "new" && !systems.find((s) => s.id === m.source)) m.source = systems[0]?.id ?? "new";
+  const rerender = () => renderSourcesTab(body);
+  const nextId = Math.max(0, ...systems.map((s) => s.id)) + 1;
+  const blank = { id: nextId, code: "", name: "", system_type: "", owner: "", description: "", active: true,
+    connections: Object.fromEntries(["dev", "test", "prod"].map((env) => [env, Object.fromEntries(k.connection_fields.map((f) => [f, ""]))])) };
+  const current = m.source === "new" ? blank : systems.find((s) => s.id === m.source);
+  // Unsaved edits survive switching the environment shown, until another source system is picked.
+  if (!m.sourceDraft || m.sourceDraft.key !== String(m.source)) m.sourceDraft = { key: String(m.source), draft: JSON.parse(JSON.stringify(current)) };
+  const draft = m.sourceDraft.draft;
+  const pick = (id) => { m.source = id; m.sourceDraft = null; rerender(); };
+
+  const list = h("div", { class: "card source-list" },
+    systems.map((s) => h("button", { class: `source-item${s.id === m.source ? " picked" : ""}`, onclick: () => pick(s.id) },
+      h("b", {}, s.code), h("span", { class: "muted-text small" }, `${s.system_type || "Type not set"} · id ${s.id}${s.active ? "" : " · inactive"}`))),
+    h("button", { class: `source-item add${m.source === "new" ? " picked" : ""}`, onclick: () => pick("new") },
+      icon("add", 16), "New source system"));
+
+  const field = (label, value, onInput, attrs = {}) => {
+    const input = h("input", { value: value ?? "", ...attrs });
+    input.addEventListener("input", () => onInput(input.value));
+    return h("label", { class: "field" }, label, input);
+  };
+  const select = (label, value, options, onChange) => h("label", { class: "field" }, label,
+    h("select", { onchange: (ev) => onChange(ev.target.value) },
+      options.map((o) => h("option", { value: o, selected: o === value ? true : null }, o || "Not set"))));
+
+  const conn = draft.connections[m.sourceEnv];
+  const connFields = k.connection_fields.map((f) => f === "auth_method"
+    ? select(CONNECTION_LABEL[f], conn[f], AUTH_METHODS.includes(conn[f]) ? AUTH_METHODS : [...AUTH_METHODS, conn[f]], (v) => { conn[f] = v; })
+    : field(CONNECTION_LABEL[f] || f, conn[f], (v) => { conn[f] = v; }));
+
+  const save = async () => {
+    if (!draft.code.trim()) return toast("Give the source system a code, like CRM", true);
+    const res = await metaCall("meta_save_source_system", { system: draft, original_id: m.source === "new" ? null : current.id, env: m.env }, "Not saved");
+    if (res) { toast(`Saved ${draft.code}`); pick(Number(draft.id)); }
+  };
+
+  const form = h("div", { class: "card pad source-form" },
+    h("div", { class: "row" }, h("h2", { class: "flush" }, m.source === "new" ? "New source system" : current.code), h("span", { class: "spacer" }),
+      m.source === "new" ? null : btn("Delete", "delete", async () => {
+        if (!(await confirmDialog(`Delete ${current.code}?`, "It is removed from source_systems.toml. Sync to remove it from LH_Keys too.", "Delete"))) return;
+        const res = await metaCall("meta_delete_source_system", { id: current.id, env: m.env }, "Not deleted");
+        if (res) { toast(`Deleted ${current.code}`); pick(null); }
+      }, "tool outline small"),
+      btn("Save", "save", save, "tool primary small")),
+    h("b", {}, "General"),
+    h("div", { class: "form-grid" },
+      field("Source system id (never changes)", draft.id, (v) => { draft.id = v; }, { type: "number", min: "1", readonly: m.source === "new" ? null : true }),
+      field("Code", draft.code, (v) => { draft.code = v; }, { placeholder: "CRM" }),
+      field("Name", draft.name, (v) => { draft.name = v; }, { placeholder: "Dynamics 365 Sales" }),
+      select("System type", draft.system_type, ["", ...k.system_types], (v) => { draft.system_type = v; }),
+      field("Owner", draft.owner, (v) => { draft.owner = v; }),
+      select("Active", draft.active ? "Yes" : "No", ["Yes", "No"], (v) => { draft.active = v === "Yes"; })),
+    field("Description", draft.description, (v) => { draft.description = v; }),
+    h("div", { class: "row" }, h("b", {}, "Connection"), h("span", { class: "spacer" }),
+      h("div", { class: "seg", role: "group", "aria-label": "Environment" }, ["dev", "test", "prod"].map((env) =>
+        h("button", { class: env === m.sourceEnv ? "on" : "", onclick: () => { m.sourceEnv = env; rerender(); } }, ENV_LABEL[env])))),
+    h("div", { class: "form-grid" }, connFields),
+    h("div", { class: "pass-box" }, icon("shield", 16),
+      "Passwords and keys never go here. Give the Key Vault URL and the secret's name; the notebook reads the secret when it runs."),
+    h("p", { class: "muted-text small" }, "Sync writes these to LH_Keys as config.source_system and config.source_connection, one row per source per environment, so notebooks and pipelines look up connections by code."));
+
+  body.replaceChildren(...[
+    k.errors.length ? h("div", { class: "problems" }, h("b", {}, "Fix these first"), gateList(k.errors)) : null,
+    h("div", { class: "sources-grid" }, list, form)].filter(Boolean));
 }
 
 window.META_VIEWS = { metadata: renderMetadata, entity: renderEntity };

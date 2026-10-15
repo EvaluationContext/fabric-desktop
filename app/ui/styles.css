@@ -459,3 +459,28 @@ h2.flush { margin: 0; }
 .list .item .type-icon.wl-rti { color: #8a3ffc; }
 .list .item .type-icon.wl-ds { color: #6b4fbb; }
 .list .item .type-icon.wl-other { color: var(--muted); }
+
+/* Surrogate keys and source systems */
+.keys-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.keys-head + * , .card:has(> .keys-head) { margin-bottom: 14px; }
+.keys-head .item { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 280px; }
+.keys-head .icon { color: var(--accent); }
+.keys-grid, .sources-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; align-items: start; }
+.sources-grid { grid-template-columns: 260px minmax(0, 1fr); }
+@media (max-width: 1000px) { .keys-grid, .sources-grid { grid-template-columns: minmax(0, 1fr); } }
+.list tr.picked td { background: var(--accent-soft); }
+.side-panel { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.side-panel input { flex: 1; min-height: 32px; padding: 0 8px; border: 1px solid var(--border-input); border-radius: 4px; }
+.sql-block { margin: 8px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: #fafafa;
+  font-family: var(--mono); font-size: 12.5px; line-height: 19px; white-space: pre; overflow-x: auto; }
+.source-list { display: flex; flex-direction: column; overflow: hidden; }
+.source-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 14px; min-height: 44px; border: 0;
+  border-bottom: 1px solid var(--border-soft); background: var(--surface); text-align: left; font: inherit; cursor: pointer; }
+.source-item:hover { background: var(--hover); }
+.source-item.picked { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.source-item.add { flex-direction: row; align-items: center; gap: 6px; color: var(--accent); }
+.source-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; }
+.seg { display: inline-flex; border: 1px solid var(--border-input); border-radius: 6px; overflow: hidden; }
+.seg button { min-height: 32px; padding: 0 14px; border: 0; background: var(--surface); font: inherit; cursor: pointer; }
+.seg button.on { background: var(--accent); color: #fff; }
