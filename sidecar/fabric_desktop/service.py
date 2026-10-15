@@ -18,8 +18,9 @@ from .auth import ADMIN_SCOPES, Authenticator
 from .fabric_api import FabricClient
 from . import lakehouse, sql
 from .jobs import Job, run_local
+from .cloud_service import CloudMixin
 from .meta_service import MetaMixin
-from .notebook import Kernel, NotebookStore, to_ipynb
+from .notebook import Kernel, NotebookStore
 from .onelake import FileStore, TableCatalog
 from .publish import run_job
 
@@ -29,7 +30,7 @@ def data_dir() -> Path:
     return Path(base) / "FabricDesktop"
 
 
-class Service(MetaMixin):
+class Service(MetaMixin, CloudMixin):
     def __init__(self, client_id: str | None = None, root: Path | None = None):
         self._client_id = client_id or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", "")
         self.root = root or data_dir()
@@ -328,11 +329,11 @@ class Service(MetaMixin):
 
     def publish_notebook(self, name: str, cells: list[dict[str, Any]],
                          lakehouse_ref: dict[str, str]) -> dict[str, Any]:
-        """Save the notebook, then create or update it as a notebook item in the lakehouse's workspace."""
-        self.notebooks.save(name, cells, lakehouse_ref)
-        ipynb = json.dumps(to_ipynb(cells, lakehouse_ref)).encode()
-        item = self.fabric.save_notebook(lakehouse_ref["workspace_id"], name, ipynb)
-        return {"name": name, "workspace_id": lakehouse_ref["workspace_id"], "id": item.get("id")}
+        """Save the notebook, then create or update it as a notebook item in the lakehouse's workspace.
+
+        A notebook that uses fabric_desktop.lakehouse is published as a Fabric Python notebook
+        with a setup cell, so it also runs there (Run in Fabric, schedules)."""
+        return self._publish(name, cells, lakehouse_ref)
 
 
 def _json_value(value: Any) -> Any:

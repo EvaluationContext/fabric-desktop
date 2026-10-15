@@ -144,3 +144,72 @@ class FabricClient:
         url = f"/workspaces/{workspace_id}/notebooks/{existing['id']}/updateDefinition"
         self._wait(self._request("POST", url, json={"definition": definition}))
         return existing
+
+    # ---- Fabric's job scheduler: run an item on Fabric capacity, now or on a schedule
+
+    def run_item_job(self, workspace_id: str, item_id: str, job_type: str,
+                     execution_data: dict[str, Any] | None = None, item_path: str = "items") -> str:
+        """Start a job instance and return its id (the last part of the Location header)."""
+        body = {"executionData": execution_data} if execution_data else None
+        resp = self._request("POST", f"/workspaces/{workspace_id}/{item_path}/{item_id}/jobs/instances",
+                             params={"jobType": job_type}, json=body)
+        location = resp.headers.get("Location", "")
+        if not location:
+            raise FabricError(f"Fabric accepted the {job_type} job but returned no job instance")
+        return location.rstrip("/").rsplit("/", 1)[-1]
+
+    def job_instance(self, workspace_id: str, item_id: str, job_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/workspaces/{workspace_id}/items/{item_id}/jobs/instances/{job_id}").json()
+
+    def cancel_job(self, workspace_id: str, item_id: str, job_id: str) -> None:
+        self._request("POST", f"/workspaces/{workspace_id}/items/{item_id}/jobs/instances/{job_id}/cancel")
+
+    def list_schedules(self, workspace_id: str, item_id: str, job_type: str) -> list[dict[str, Any]]:
+        return self._paged(f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules")
+
+    def create_schedule(self, workspace_id: str, item_id: str, job_type: str,
+                        configuration: dict[str, Any], enabled: bool = True) -> dict[str, Any]:
+        url = f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules"
+        return self._request("POST", url, json={"enabled": enabled, "configuration": configuration}).json()
+
+    def delete_schedule(self, workspace_id: str, item_id: str, job_type: str, schedule_id: str) -> None:
+        self._request("DELETE", f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules/{schedule_id}")
+
+    def run_table_maintenance(self, workspace_id: str, lakehouse_id: str, table: str, schema: str | None = None,
+                              v_order: bool = True, z_order_by: list[str] | None = None,
+                              vacuum_retention: str | None = "7.01:00:00") -> str:
+        """OPTIMIZE (with V-Order) and VACUUM one table on Fabric capacity. Returns the job id."""
+        data: dict[str, Any] = {"tableName": table, "optimizeSettings": {"vOrder": "true" if v_order else "false"}}
+        if schema:
+            data["schemaName"] = schema
+        if z_order_by:
+            data["optimizeSettings"]["zOrderBy"] = list(z_order_by)
+        if vacuum_retention:
+            data["vacuumSettings"] = {"retentionPeriod": vacuum_retention}
+        return self.run_item_job(workspace_id, lakehouse_id, "TableMaintenance", data, item_path="lakehouses")
+
+    # ---- semantic models and the SQL analytics endpoint
+
+    def list_semantic_models(self, workspace_id: str) -> list[dict[str, Any]]:
+        return self._paged(f"/workspaces/{workspace_id}/semanticModels")
+
+    def save_semantic_model(self, workspace_id: str, name: str, parts: dict[str, str],
+                            description: str = "") -> dict[str, Any]:
+        """Create the semantic model from TMDL files, or replace the definition of the one with this name."""
+        definition = {"parts": [{"path": path, "payload": base64.b64encode(text.encode()).decode(),
+                                 "payloadType": "InlineBase64"} for path, text in parts.items()]}
+        existing = next((m for m in self.list_semantic_models(workspace_id) if m["displayName"] == name), None)
+        if existing is None:
+            body: dict[str, Any] = {"displayName": name, "definition": definition}
+            if description:
+                body["description"] = description
+            created = self._wait(self._request("POST", f"/workspaces/{workspace_id}/semanticModels", json=body))
+            return created | {"created": True}
+        url = f"/workspaces/{workspace_id}/semanticModels/{existing['id']}/updateDefinition"
+        self._wait(self._request("POST", url, json={"definition": definition}))
+        return existing | {"created": False}
+
+    def refresh_sql_endpoint(self, workspace_id: str, sql_endpoint_id: str) -> dict[str, Any]:
+        """Ask the lakehouse's SQL analytics endpoint to pick up tables written from outside Fabric."""
+        url = f"/workspaces/{workspace_id}/sqlEndpoints/{sql_endpoint_id}/refreshMetadata"
+        return self._wait(self._request("POST", url, json={}))

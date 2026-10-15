@@ -4,7 +4,7 @@
 
 state.meta = {
   project: null,       // summary from meta_project
-  tab: "entities",     // entities | layers | keys | sources | runs | environments
+  tab: "entities",     // entities | layers | keys | sources | runs | health | model | environments
   env: "dev",
   entity: null,        // open entity detail
   layersDraft: null,   // unsaved layer edits
@@ -31,8 +31,8 @@ function layerChip(name) {
 }
 
 function statusPill(status) {
-  const cls = { ok: "pass", failed: "fail", needs_decision: "wrn", skipped: "neu", unavailable: "neu" }[status] || "neu";
-  const label = { ok: "Succeeded", failed: "Failed", needs_decision: "Needs a decision", skipped: "Skipped" }[status] || status;
+  const cls = { ok: "pass", failed: "fail", needs_decision: "wrn", skipped: "neu", unavailable: "neu", running: "info" }[status] || "neu";
+  const label = { ok: "Succeeded", failed: "Failed", needs_decision: "Needs a decision", skipped: "Skipped", running: "Running" }[status] || status;
   return h("span", { class: `pill-s ${cls}` }, label);
 }
 
@@ -81,7 +81,7 @@ async function renderMetadata() {
   if (!p.path) return renderMetaSetup(p);
   const m = state.meta;
   const tabs = [["entities", "Entities"], ["layers", "Layers"], ["keys", "Surrogate keys"], ["sources", "Source systems"],
-    ["runs", "Runs"], ["environments", "Environments and promote"]];
+    ["runs", "Runs"], ["health", "Table health"], ["model", "Semantic model"], ["environments", "Environments and promote"]];
   const body = h("div", { class: "meta-body" });
   setView(h("div", { class: "page" },
     h("div", { class: "page-head" },
@@ -98,7 +98,7 @@ async function renderMetadata() {
       h("button", { class: `tab${m.tab === id ? " active" : ""}`, onclick: () => goMeta(id) }, label))),
     body));
   const render = { entities: renderEntitiesTab, layers: renderLayersTab, keys: renderKeysTab, sources: renderSourcesTab,
-    runs: renderRunsTab, environments: renderEnvTab }[m.tab];
+    runs: renderRunsTab, health: renderHealthTab, model: renderModelTab, environments: renderEnvTab }[m.tab];
   await render(body, p);
 }
 
@@ -287,6 +287,7 @@ async function renderEntity() {
           const res = await metaCall("meta_delete_entity", { name: e.name }, "Not deleted");
           if (res) { toast(`Deleted ${e.name}`); goMeta("entities"); }
         }, "tool outline"),
+        btn("Profile", "dataBarVertical", () => profileEntity(e.name), "tool outline"),
         btn("Rebuild with downstream", "sync", () => runEntities([e.name], { cascade: true }), "tool outline"),
         btn("Run", "play", () => (dirty() ? save() : Promise.resolve()).then(() => runEntities([e.name])), "tool primary"))),
     h("div", { class: "card pad" },
@@ -363,6 +364,8 @@ function showRunResults(results, decision) {
     statusPill(r.status), h("span", { class: "mono" }, r.entity),
     h("span", { class: "muted-text" }, r.status === "ok" ? `${r.rows_written} rows written${r.quarantined ? `, ${r.quarantined} quarantined` : ""}`
       : r.status === "needs_decision" ? "Waiting for your choice below" : r.message),
+    r.maintenance === "queued" ? h("span", { class: "pill-s info", title: "Fabric's table maintenance job: OPTIMIZE with V-Order, then VACUUM" }, "Optimize queued") : null,
+    r.maintenance === "Failed" ? h("span", { class: "pill-s wrn", title: r.maintenance_message }, "Optimize not started") : null,
     r.run_id && r.status !== "needs_decision" ? btn("Details", null, () => showRun(r.run_id), "tool link small") : null));
   const actions = [btn("Close", null, closeDialog, decision ? "tool outline" : "tool primary")];
   let body = h("div", { class: "scroll" }, rows);
@@ -738,3 +741,179 @@ async function renderSourcesTab(body) {
 }
 
 window.META_VIEWS = { metadata: renderMetadata, entity: renderEntity };
+
+// ---------- table health ----------
+
+function formatBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
+function shortDate(iso) {
+  return iso ? new Date(iso).toLocaleString() : "never";
+}
+
+async function renderHealthTab(body) {
+  const m = state.meta;
+  body.replaceChildren(h("p", { class: "muted-text" }, "Reading every table's Delta log..."));
+  if (m.env !== "dev" && !state.user && !(await signIn())) return;
+  const hl = await metaCall("meta_health", { env: m.env });
+  if (!hl || state.view !== "metadata" || m.tab !== "health") return;
+  const optimize = async (entities) => {
+    toast(hl.local ? "Compacting on this PC..." : "Starting Fabric's table maintenance...");
+    const res = await metaCall("meta_optimize", { env: m.env, entities }, "Optimize failed");
+    if (!res) return;
+    const failed = res.filter((r) => r.status === "Failed");
+    toast(failed.length ? `${failed.length} of ${res.length} didn't start: ${failed[0].message}`
+      : hl.local ? `Compacted ${res.length} table${res.length === 1 ? "" : "s"}` : `Queued ${res.length} maintenance job${res.length === 1 ? "" : "s"} in Fabric`, failed.length > 0);
+    renderHealthTab(body);
+  };
+  const needs = hl.tables.filter((t) => t.status === "needs_maintenance");
+  const head = h("div", { class: "card pad" },
+    h("div", { class: "row wrap" },
+      h("b", {}, hl.local ? `${ENV_LABEL[m.env]} tables on this PC` : `${ENV_LABEL[m.env]} tables in OneLake`),
+      h("span", { class: "muted-text" }, needs.length ? `${needs.length} of ${hl.tables.length} would benefit from maintenance` : "Every table is in good shape"),
+      h("span", { class: "spacer" }),
+      btn("Refresh", "sync", () => renderHealthTab(body), "tool outline small"),
+      btn(hl.local ? "Compact all" : "Optimize all in Fabric", "flash", () => optimize(null), "tool primary small")),
+    h("p", { class: "muted-text" }, hl.local
+      ? "Optimize here compacts small files and removes versions older than 7 days with delta-rs. V-Order is added in Fabric, after promote."
+      : "Optimize runs Fabric's table maintenance job on the workspace's capacity: OPTIMIZE with V-Order (what Direct Lake and the SQL endpoint read fastest), then VACUUM with 7 days' retention. Tables written from this PC have no V-Order until it runs."),
+    hl.local ? null : h("label", { class: "check" },
+      h("input", { type: "checkbox", checked: hl.optimize_after_run ? true : null, onchange: async (ev) => {
+        const res = await metaCall("meta_set_maintenance", { env: m.env, optimize_after_run: ev.target.checked });
+        if (res) toast(ev.target.checked ? "Every table a run writes gets optimized in Fabric afterwards" : "Runs no longer optimize afterwards");
+      } }),
+      `Optimize every table a ${ENV_LABEL[m.env]} run writes, right after the run`));
+  const rows = hl.tables.filter((t) => matches(`${t.entity} ${t.layer}`));
+  const list = h("table", { class: "list" },
+    h("thead", {}, h("tr", {}, ["Table", "Layer", "Files", "Size", "Avg file", hl.local ? null : "V-Order", "Versions since VACUUM", "Last optimize", "Advice", ""]
+      .filter((c) => c !== null).map((c) => h("th", {}, c)))),
+    h("tbody", {}, rows.map((t) => h("tr", {},
+      h("td", {}, h("span", { class: "mono" }, t.entity)),
+      h("td", {}, t.layer ? layerChip(t.layer) : h("span", { class: "muted-text" }, "run metadata")),
+      t.exists ? [
+        h("td", { class: "n" }, t.files), h("td", { class: "n" }, formatBytes(t.bytes)), h("td", { class: "n" }, formatBytes(t.avg_file_bytes)),
+        hl.local ? null : h("td", {}, t.v_ordered ? h("span", { class: "pill-s pass" }, "Yes") : h("span", { class: "pill-s wrn" }, "No")),
+        h("td", { class: "n" }, t.versions_since_vacuum), h("td", {}, shortDate(t.last_optimize)),
+        h("td", {}, t.advice.length ? h("ul", { class: "gate-list" }, t.advice.map((a) => h("li", {}, a))) : h("span", { class: "pill-s pass" }, "Healthy")),
+        h("td", {}, btn(hl.local ? "Compact" : "Optimize", null, () => optimize([t.entity]), "tool link small")),
+      ] : h("td", { colspan: hl.local ? 8 : 9, class: "muted-text" }, t.message || "Not written in this environment yet")))));
+  const jobs = hl.maintenance || [];
+  body.replaceChildren(head, list, jobs.length ? h("div", { class: "card pad" }, h("b", {}, "Recent maintenance jobs in Fabric"),
+    h("table", { class: "mini" }, h("tbody", {}, jobs.map((j) => h("tr", {},
+      h("td", {}, statusPill(fabricStatus(j.status))), h("td", { class: "mono" }, j.table),
+      h("td", {}, shortDate(j.started_at)), h("td", { class: "muted-text" }, j.message || "")))))) : null);
+}
+
+// ---------- Direct Lake semantic model ----------
+
+async function renderModelTab(body) {
+  const m = state.meta;
+  if (m.env === "dev" && (state.meta.project?.environments?.dev?.target || "local") === "local") {
+    body.replaceChildren(infoCard("Pick Test or Prod",
+      "A Direct Lake semantic model reads its tables straight from OneLake, and Dev keeps its tables on this PC. Switch the environment above to Test or Prod, where promote has put the tables in Fabric."));
+    return;
+  }
+  body.replaceChildren(h("p", { class: "muted-text" }, "Reading the layer's tables and relationships..."));
+  if (!state.user && !(await signIn())) return;
+  const plan = await metaCall("meta_model_plan", { env: m.env, layer: m.modelLayer || null });
+  if (!plan || state.view !== "metadata" || m.tab !== "model") return;
+  const layer = h("select", { onchange: (e) => { m.modelLayer = e.target.value; renderModelTab(body); } },
+    plan.layers.map((l) => h("option", { value: l, selected: l === plan.layer ? true : null }, l)));
+  const name = h("input", { value: m.modelName || plan.name, oninput: (e) => { m.modelName = e.target.value; } });
+  const result = h("div", {});
+  const build = async () => {
+    toast(`Building ${name.value} in ${plan.workspace_name || "the workspace"}...`);
+    const res = await metaCall("meta_build_model", { env: m.env, layer: plan.layer, name: name.value }, "Model not built");
+    if (!res) return;
+    toast(`${res.created ? "Created" : "Updated"} ${res.name}`);
+    result.replaceChildren(h("div", { class: "pass-box" }, icon("ok", 16),
+      `${res.created ? "Created" : "Updated"} ${res.name}: ${res.tables.length} tables, ${res.relationships} relationship${res.relationships === 1 ? "" : "s"}.`,
+      res.skipped.length ? ` Not written yet, so left out: ${res.skipped.join(", ")}.` : "",
+      res.endpoint_refreshed ? "" : " The SQL endpoint refresh didn't run; if a table is missing, refresh the lakehouse in Fabric and build again.",
+      res.url ? btn("Open in Fabric", "open", () => openInFabric(res.url), "tool link small") : null));
+  };
+  body.replaceChildren(
+    h("div", { class: "card pad" },
+      h("div", { class: "row wrap" }, h("b", {}, "Direct Lake semantic model"), h("span", { class: "spacer" }),
+        plan.existing ? btn("Open in Fabric", "open", () => openInFabric(plan.existing.url), "tool outline small") : null,
+        btn(plan.existing ? "Update model" : "Create model", "cube", build, "tool primary small")),
+      h("p", { class: "muted-text" }, `Reads ${plan.lakehouse} in ${plan.workspace_name || plan.workspace_id} through its SQL analytics endpoint, with no import and no refresh schedule. Relationships come from the metadata. Surrogate keys and the framework's _run_id and _loaded_at columns are hidden; every fact gets a row count measure. Updating keeps every column's lineage tag, so reports built on the model keep working.`),
+      h("div", { class: "row wrap" }, h("label", { class: "field" }, "Layer", layer), h("label", { class: "field grow" }, "Model name", name)),
+      result),
+    h("div", { class: "entity-grid" },
+      h("div", { class: "card pad grow" }, h("b", {}, `Tables (${plan.tables.length})`),
+        h("table", { class: "mini" }, h("thead", {}, h("tr", {}, ["Table", "Kind", "Delta table", "Entity"].map((c) => h("th", {}, c)))),
+          h("tbody", {}, plan.tables.map((t) => h("tr", {}, h("td", { class: "mono" }, t.name),
+            h("td", {}, h("span", { class: `pill-s ${t.kind === "dimension" ? "info" : "neu"}` }, t.kind)),
+            h("td", { class: "mono" }, t.source), h("td", {}, h("button", { class: "tool link mono", onclick: () => openEntity(t.entity) }, t.entity))))))),
+      h("div", { class: "side" }, h("div", { class: "card pad" }, h("b", {}, `Relationships (${plan.relationships.length})`),
+        plan.relationships.length ? h("table", { class: "mini" }, h("tbody", {}, plan.relationships.map((r) => h("tr", {},
+          h("td", {}, h("div", { class: "rel-cell" }, h("span", { class: "mono" }, `${r.from_table}.${r.from_column}`),
+            h("span", { class: "mono" }, `→ ${r.to_table}.${r.to_column}`),
+            h("span", { class: "muted-text" }, r.active ? r.why : `inactive: ${r.why}`)))))))
+          : h("p", { class: "muted-text" }, "None found. Facts relate to a dimension through a [[lookup]] block, or a column named like the dimension's surrogate key.")))));
+}
+
+// ---------- profiling ----------
+
+// Profile what an entity reads, on this PC, and turn what it finds into [[clean]] and [[check]] blocks.
+async function profileEntity(name, source = true) {
+  const m = state.meta;
+  const overlay = showDialog(`Profile ${name}`, h("p", { class: "muted-text" }, `Reading ${source ? "what it reads" : "its table"} in ${ENV_LABEL[m.env]}...`));
+  overlay.querySelector(".dialog").classList.add("wide");
+  const prof = await metaCall("meta_profile", { name, env: m.env, source }, "Profile failed");
+  if (!prof) return;
+  const picked = new Set();
+  const preview = h("div", {});
+  const addBtn = btn("Add to entity", "add", async () => {
+    const blocks = prof.suggestions.filter((s) => picked.has(s.id)).map((s) => s.toml);
+    const res = await metaCall("meta_add_rules", { name, blocks }, "Not added");
+    if (!res) return;
+    closeDialog();
+    toast(res.errors.length ? `Added, with ${res.errors.length} problem${res.errors.length === 1 ? "" : "s"} to fix` : `Added ${blocks.length} rule${blocks.length === 1 ? "" : "s"} to ${name}. Run it to apply them.`);
+    render();
+  }, "tool primary", { disabled: true });
+  const sync = () => {
+    addBtn.disabled = !picked.size;
+    addBtn.lastChild.textContent = picked.size ? `Add ${picked.size} to entity` : "Add to entity";
+  };
+  const showPreview = async () => {
+    const rules = prof.suggestions.filter((s) => picked.has(s.id) && s.kind === "clean").map((s) => s.rule);
+    if (!rules.length) { preview.replaceChildren(h("p", { class: "muted-text" }, "Tick a cleaning rule to see what it changes.")); return; }
+    preview.replaceChildren(h("p", { class: "muted-text" }, "Applying the rules on this PC..."));
+    const res = await metaCall("meta_profile_preview", { name, env: m.env, rules });
+    if (!res) return;
+    const cols = res.columns.flatMap((c) => [c, `${c} (after)`]);
+    preview.replaceChildren(h("b", {}, `Before and after: ${res.changed} value${res.changed === 1 ? "" : "s"} change`),
+      res.rows.length ? dataTable({ columns: cols, rows: res.rows }) : h("p", { class: "muted-text" }, "Nothing changes."));
+  };
+  const kindPill = (k) => h("span", { class: `pill-s ${k === "clean" ? "cus" : k === "check" ? "info" : "neu"}` }, k === "info" ? "note" : k);
+  const suggestions = prof.suggestions.length ? h("table", { class: "mini" }, h("tbody", {}, prof.suggestions.map((sg) => h("tr", {},
+    h("td", {}, sg.toml ? h("input", { type: "checkbox", "aria-label": sg.id, onchange: (e) => {
+      if (e.target.checked) picked.add(sg.id); else picked.delete(sg.id);
+      sync();
+      if (sg.kind === "clean") showPreview();
+    } }) : null),
+    h("td", {}, kindPill(sg.kind)), h("td", { class: "mono" }, sg.column), h("td", {}, sg.why),
+    h("td", {}, sg.toml ? h("pre", { class: "sql-block" }, sg.toml.trim()) : null)))))
+    : h("p", { class: "muted-text" }, "No suggestions: the rules in place already cover what the profile found.");
+  const columns = h("table", { class: "mini" },
+    h("thead", {}, h("tr", {}, ["Column", "Type", "Nulls", "Distinct", "Range or length", "Most common", "Found"].map((c) => h("th", {}, c)))),
+    h("tbody", {}, prof.columns.map((c) => h("tr", {},
+      h("td", { class: "mono" }, c.name), h("td", { class: "muted-text mono" }, c.type),
+      h("td", { class: "n" }, `${c.nulls} (${c.null_pct}%)`), h("td", { class: "n" }, c.distinct),
+      h("td", { class: "mono small" }, c.min !== undefined ? `${c.min} to ${c.max}` : c.min_length !== undefined ? `${c.min_length} to ${c.max_length} chars` : ""),
+      h("td", { class: "small" }, c.top.slice(0, 3).map((t) => `${t.value} (${t.count})`).join(", ")),
+      h("td", {}, c.issues.length ? c.issues.map((i) => h("div", { class: "small" }, i)) : h("span", { class: "pill-s pass" }, "clean"))))));
+  showDialog(`Profile ${name}`, h("div", { class: "scroll" },
+    h("div", { class: "row wrap" },
+      h("span", { class: "muted-text" }, `${prof.rows} rows ${source ? "as read, before cleaning" : "in its table"} · ${ENV_LABEL[m.env]} · ${prof.seconds}s on this PC`),
+      h("span", { class: "spacer" }),
+      btn(source ? "Profile its table instead" : "Profile what it reads", null, () => profileEntity(name, !source), "tool link small")),
+    h("b", {}, "Suggestions"), suggestions, preview, h("b", {}, "Columns"), columns),
+  [btn("Close", null, closeDialog, "tool outline"), addBtn]).querySelector(".dialog").classList.add("wide");
+}

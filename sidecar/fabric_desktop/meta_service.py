@@ -146,7 +146,7 @@ class MetaMixin:
                              target: str = "onelake") -> dict[str, Any]:
         project = self._project()
         envs = dict(project.environments)
-        keep = {k: v for k, v in envs.get(env, {}).items() if k.startswith("keys_")}
+        keep = {k: v for k, v in envs.get(env, {}).items() if k.startswith("keys_") or k == "optimize_after_run"}
         envs[env] = ({"target": "local"} if target == "local" else {
             "target": "onelake", "workspace_id": workspace_id, "workspace_name": workspace_name}) | keep
         self._write_environments(project, envs)
@@ -262,12 +262,15 @@ class MetaMixin:
                  cascade: bool = False) -> list[dict[str, Any]]:
         project = self._project()
         keys_store = self._keys_store(project, env, create=env == "dev") if self._uses_keys(project, names) else None
-        engine = Engine(project, self._store(project, env, create=env == "dev"), keys_store=keys_store)
+        store = self._store(project, env, create=env == "dev")
+        engine = Engine(project, store, keys_store=keys_store)
         if cascade and names and len(names) == 1:
             results: list[RunResult] = engine.backfill(names[0])
         else:
             results = engine.run_many(names, backfill=backfill)
-        return [r.to_dict() for r in results]
+        out = [r.to_dict() for r in results]
+        self._after_run(project, env, store, out)  # type: ignore[attr-defined]
+        return out
 
     def meta_runs(self, env: str = "dev", limit: int = 100) -> list[dict[str, Any]]:
         project = self._project()
