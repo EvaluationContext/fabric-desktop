@@ -37,7 +37,7 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin):
         self._client_id = client_id or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", "")
         self.root = root or data_dir()
         self._auth: Authenticator | None = None
-        self.kernel = Kernel()
+        self.kernel = Kernel(token=self._token_for, load_notebook=lambda name: self.notebooks.load(name)["cells"])
         self.notebooks = NotebookStore(self.root / "notebooks")
         self._schema_cache: dict[str, bool] = {}
         self._tables: dict[str, Any] | None = None
@@ -254,10 +254,41 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin):
         self._attach(lakehouse_ref)
         return self.kernel.run(code)
 
+    # The app runs cells with start_cell, then polls: output shows while the cell runs, and
+    # interrupt_cell stops it without clearing variables.
+    def start_cell(self, code: str, lakehouse_ref: dict[str, str] | None = None,
+                   notebook: str | None = None) -> dict[str, Any]:
+        self._attach(lakehouse_ref)
+        self.kernel.notebook_name = notebook or ""
+        return self.kernel.start(code)
+
+    def poll_cell(self, version: int = -1, wait: float = 0.0) -> dict[str, Any]:
+        return self.kernel.poll(version, wait)
+
+    def interrupt_cell(self) -> dict[str, Any]:
+        return self.kernel.interrupt()
+
+    def kernel_variables(self) -> list[dict[str, Any]]:
+        return self.kernel.variables()
+
+    def kernel_complete(self, code: str, cursor: int | None = None) -> dict[str, Any]:
+        return self.kernel.complete(code, cursor)
+
+    def _token_for(self, audience: str) -> str:
+        """notebookutils.credentials.getToken on this PC: a token for you, from your sign-in."""
+        from .notebookutils_local import _AUDIENCES
+        if audience == "storage":
+            return self.auth.storage_token()
+        if audience == "pbi":
+            return self.auth.fabric_token()
+        scopes = _AUDIENCES.get(audience) or [audience.rstrip("/") + "/.default"]
+        return self.auth._token(scopes)
+
     def _attach(self, lakehouse_ref: dict[str, str] | None) -> None:
         lakehouse.attach(None if not lakehouse_ref else lakehouse.Attached(
             workspace_id=lakehouse_ref["workspace_id"], lakehouse_id=lakehouse_ref["lakehouse_id"],
-            name=lakehouse_ref["name"], storage_token=lambda: self.auth.storage_token(),
+            name=lakehouse_ref["name"], workspace_name=lakehouse_ref.get("workspace_name") or "",
+            storage_token=lambda: self.auth.storage_token(),
             work_dir=self.root, history_file=self.history_file,
             schemas_enabled=lambda: self._schemas_enabled(lakehouse_ref["workspace_id"], lakehouse_ref["lakehouse_id"])))
 

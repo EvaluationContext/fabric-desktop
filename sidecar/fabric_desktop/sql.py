@@ -9,6 +9,8 @@ is ``lakehouse.write_table``.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import duckdb
 import pyarrow as pa
 import sqlglot
@@ -18,7 +20,7 @@ from sqlglot.errors import ParseError
 from . import lakehouse
 
 
-def _parse(query: str) -> list[exp.Expression]:
+def parse(query: str) -> list[exp.Expression]:
     """Spark SQL first; DuckDB SQL is accepted too when it isn't valid Spark."""
     try:
         statements = sqlglot.parse(query, read="spark")
@@ -33,29 +35,38 @@ def _parse(query: str) -> list[exp.Expression]:
     return statements
 
 
+def bind_tables(statement: exp.Expression, con: duckdb.DuckDBPyConnection, views: dict[str, str],
+                is_local: Callable[[str], bool] = lambda _name: False) -> None:
+    """Point every lakehouse table ``statement`` names at a Delta dataset registered on ``con``.
+
+    ``is_local(name)`` says a name is already a view or table on ``con`` (like a Spark temp
+    view), so it is left alone."""
+    ctes = {c.alias_or_name.lower() for c in statement.find_all(exp.CTE)}
+    for table in list(statement.find_all(exp.Table)):
+        if not isinstance(table.this, exp.Identifier):
+            continue  # a table function such as range(10)
+        if not table.db and (table.name.lower() in ctes or is_local(table.name)):
+            continue
+        if table.catalog:
+            raise ValueError(f"{table.sql('spark')}: name tables as table or schema.table "
+                             f"in the attached lakehouse.")
+        name = f"{table.db}.{table.name}" if table.db else table.name
+        key = name.lower()
+        if key not in views:
+            views[key] = f"__lakehouse_table_{len(views)}"
+            con.register(views[key], lakehouse.open_table(name).to_pyarrow_dataset())
+        # Keep the name the query used as the alias, so sales.Country still resolves.
+        alias = table.args.get("alias") or exp.TableAlias(this=exp.to_identifier(table.name))
+        table.replace(exp.Table(this=exp.to_identifier(views[key]), alias=alias))
+
+
 def run(query: str) -> pa.Table:
     """Run every statement in ``query`` and return the last one's result."""
     con = duckdb.connect()
     views: dict[str, str] = {}
     result = None
-    for statement in _parse(query):
-        ctes = {c.alias_or_name.lower() for c in statement.find_all(exp.CTE)}
-        for table in list(statement.find_all(exp.Table)):
-            if not isinstance(table.this, exp.Identifier):
-                continue  # a table function such as range(10)
-            if not table.db and table.name.lower() in ctes:
-                continue
-            if table.catalog:
-                raise ValueError(f"{table.sql('spark')}: name tables as table or schema.table "
-                                 f"in the attached lakehouse.")
-            name = f"{table.db}.{table.name}" if table.db else table.name
-            key = name.lower()
-            if key not in views:
-                views[key] = f"__lakehouse_table_{len(views)}"
-                con.register(views[key], lakehouse.open_table(name).to_pyarrow_dataset())
-            # Keep the name the query used as the alias, so sales.Country still resolves.
-            alias = table.args.get("alias") or exp.TableAlias(this=exp.to_identifier(table.name))
-            table.replace(exp.Table(this=exp.to_identifier(views[key]), alias=alias))
+    for statement in parse(query):
+        bind_tables(statement, con, views)
         result = con.execute(statement.sql("duckdb"))
     if not result.description:
         return pa.table({})

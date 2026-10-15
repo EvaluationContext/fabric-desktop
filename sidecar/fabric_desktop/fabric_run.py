@@ -123,11 +123,23 @@ def _sql_cell(source: str) -> dict[str, Any]:
     return {"type": "code", "source": f"lakehouse.sql({json.dumps(query)})"}
 
 
+_USES_SPARK = re.compile(r"(\bspark\s*\.|\b(from|import)\s+pyspark\b|^\s*%%pyspark\b|\bSparkSession\b)", re.M)
+
+
+def uses_spark(cells: list[dict[str, Any]]) -> bool:
+    return any(c.get("type") != "markdown" and _USES_SPARK.search(c.get("source", "")) for c in cells)
+
+
 def fabric_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None,
                  schemas_enabled: bool = True) -> dict[str, Any]:
-    """The notebook as it is published to Fabric."""
+    """The notebook as it is published to Fabric.
+
+    A notebook that uses Spark is published as a Spark notebook, where ``spark`` and ``%%sql``
+    are Fabric's own; one that uses only the lakehouse module becomes a Python notebook."""
     if not lakehouse or not uses_local_module(cells):
         return to_ipynb(cells, lakehouse)
+    if uses_spark(cells):
+        return to_ipynb([shim_cell(lakehouse, schemas_enabled)] + cells, lakehouse)
     body = [_sql_cell(c["source"]) if c.get("type") != "markdown" and c.get("source", "").lstrip().startswith("%%sql")
             else c for c in cells]
     nb = to_ipynb([shim_cell(lakehouse, schemas_enabled)] + body, lakehouse)
@@ -138,15 +150,18 @@ def fabric_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None,
 
 # ---- where a notebook can run
 
-# Code that needs Fabric's Spark runtime or its notebook services. The local kernel runs plain Python.
+# Code that needs Fabric's Spark runtime or its notebook services. On this PC, ``spark`` is
+# DuckDB's PySpark-compatible API and ``notebookutils`` covers fs, notebook, credentials and
+# runtime, so most PySpark notebooks run here; these parts don't.
 _FABRIC_ONLY = [
-    (re.compile(r"^\s*%%(pyspark|spark|sparkr|csharp|configure)\b", re.M), "uses a Spark cell magic"),
-    (re.compile(r"^\s*%run\b", re.M), "runs another Fabric notebook with %run"),
-    (re.compile(r"\b(from|import)\s+pyspark\b"), "imports PySpark"),
-    (re.compile(r"\bspark\s*\.\s*\w"), "uses the Spark session (spark.)"),
-    (re.compile(r"\b(mssparkutils|notebookutils)\b"), "uses Fabric notebook utilities"),
+    (re.compile(r"^\s*%%(spark|sparkr|csharp)\b", re.M), "uses a Scala, R or .NET cell"),
+    (re.compile(r"\b(sparkContext|\.rdd\b|pandas_udf|spark\.udf|\.mapInPandas|\.applyInPandas)"),
+     "uses a Spark feature this PC's Spark doesn't have"),
+    (re.compile(r"\b(spark\.readStream|\.writeStream)\b"), "uses Spark streaming"),
+    (re.compile(r"\b(notebookutils|mssparkutils)\.(fs\.(mount|unmount)|session|lakehouse|warehouse|"
+                r"variableLibrary|udf|connections)\b"), "uses Fabric notebook utilities that need Fabric"),
 ]
-_SQL_WRITE = re.compile(r"\b(MERGE\s+INTO|INSERT\s+(INTO|OVERWRITE)|UPDATE|DELETE\s+FROM)\b", re.I)
+_SQL_WRITE = re.compile(r"\b(MERGE\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b", re.I)
 # A path on this PC's disk, like C:\data or D:/exports. Fabric can't reach it.
 _LOCAL_PATH = re.compile(r"""["'][A-Za-z]:[\\/]""")
 
@@ -171,7 +186,7 @@ def compute_check(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None)
             continue
         if source.lstrip().startswith("%%sql"):
             if _SQL_WRITE.search(source):
-                local.append({"cell": n, "text": "changes tables with Spark SQL, which runs in Fabric only",
+                local.append({"cell": n, "text": "changes table rows in place (MERGE, UPDATE or DELETE), which runs in Fabric only",
                               "code": _snippet(source)})
         else:
             hit = next(((m, text) for rx, text in _FABRIC_ONLY if (m := rx.search(source))), None)

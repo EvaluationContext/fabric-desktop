@@ -39,6 +39,7 @@ class Attached:
     storage_token: Callable[[], str]
     work_dir: Path
     history_file: Path | None = None
+    workspace_name: str = ""
     # False for a lakehouse created without schemas (tables live directly under Tables/).
     schemas_enabled: Callable[[], bool] = lambda: True
 
@@ -92,12 +93,38 @@ def table_ref(table: str) -> TableRef:
     return TableRef(lh.workspace_id, lh.lakehouse_id, "dbo", name_, flat=True)
 
 
+MOUNT = "/lakehouse/default/"
+
+
+def relative_path(path: str) -> str | None:
+    """``Files/...`` or ``Tables/...`` when ``path`` names something in the attached lakehouse.
+
+    Accepts the forms Fabric notebooks use: ``Files/x.csv``, ``/lakehouse/default/Files/x.csv``
+    and ``abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/x.csv``."""
+    p = str(path).replace("\\", "/")
+    if p.startswith(MOUNT):
+        p = p[len(MOUNT):]
+    elif p.startswith("abfss://") and "onelake." in p:
+        workspace, _, rest = p[len("abfss://"):].partition("@")
+        _host, _, rest = rest.partition("/")
+        item, _, p = rest.partition("/")
+        lh = _current()
+        if workspace not in (lh.workspace_id, lh.workspace_name) or \
+                item.removesuffix(".Lakehouse") not in (lh.lakehouse_id, lh.name):
+            raise ValueError(f"{path} is in another lakehouse. On this PC, notebooks read the attached "
+                             f"lakehouse ({lh.name}); attach that one with Add data items.")
+    p = p.lstrip("/")
+    return p if p in ("Files", "Tables") or p.startswith(("Files/", "Tables/")) else None
+
+
 def local_path(path: str) -> Path:
-    """A local path for ``path``, downloading it first when it is under ``Files/``."""
-    if not path.replace("\\", "/").startswith("Files/"):
+    """A local path for ``path``, downloading it first when it is in the lakehouse's ``Files/``."""
+    rel = relative_path(path)
+    if rel is None:
         return Path(path)
+    if not rel.startswith("Files/"):
+        raise ValueError(f"{path} is not a file under Files/. Read tables with read_table.")
     lh = _current()
-    rel = path.replace("\\", "/")
     dest = lh.work_dir / "files" / lh.lakehouse_id / rel
     return FileStore(lh.storage_token).download(lh.workspace_id, lh.lakehouse_id, rel, dest)
 
