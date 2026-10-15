@@ -666,3 +666,37 @@ table.vars tr.click:hover td { background: var(--hover); }
 input.days { width: 64px; min-height: 28px; padding: 0 6px; border: 1px solid var(--border-input); border-radius: 4px; }
 .tests-summary { margin-bottom: 12px; }
 .dialog.roomy { max-width: 900px; width: 92vw; }
+
+/* ---- schedules */
+.pill-btn { border: 0; cursor: pointer; font-family: inherit; }
+.pill-btn:hover { filter: brightness(0.95); }
+.nowrap { white-space: nowrap; }
+.schedules-panel { padding: 4px 16px 16px; }
+.schedule-summary { display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 0 4px; color: #424242; }
+.schedule-summary .bad { color: #b10e1c; }
+.schedule-head { display: flex; align-items: center; gap: 12px; margin: 14px 0 6px; }
+.schedule-head h3, h3.schedule-head { font-size: 14px; margin: 14px 0 6px; }
+.schedule-head.row h3 { margin: 0; }
+.row.tight { gap: 6px; align-items: center; }
+.schedule-list { max-height: 220px; }
+
+/* ---- estate x-ray */
+.xray { display: flex; flex-direction: column; gap: 10px; }
+.xray-head { display: flex; align-items: flex-start; gap: 12px; }
+.xray-head h2 { margin: 0 0 2px; }
+.xray-stats { display: flex; gap: 10px; flex-wrap: wrap; }
+.xray-stat { display: flex; flex-direction: column; min-width: 110px; padding: 8px 12px; border-radius: 6px; background: #f5f5f5; }
+.xray-stat b { font-size: 20px; font-weight: 600; color: #1b3664; }
+.xray-stat span { font-size: 12px; color: #616161; }
+.xray-stat.bad b { color: #b10e1c; }
+.xray-stat.warn b { color: #8a5300; }
+.xray-stat.good b { color: #0e5c2a; }
+.xray-chips .count { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: rgba(0,0,0,0.08); font-size: 11px; }
+.xray-list { display: flex; flex-direction: column; border-top: 1px solid #edebe9; }
+.xray-item { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid #edebe9; }
+.xray-item .pill-s { min-width: 84px; text-align: center; }
+.xray-item .where { margin-top: 2px; }
+.xray-progress { display: flex; flex-direction: column; gap: 6px; }
+.xray-progress .bar { transition: width 0.4s; }
+.xray-lakehouses summary { cursor: pointer; padding: 6px 0; }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }

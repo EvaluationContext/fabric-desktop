@@ -186,6 +186,10 @@ class CloudService(Service):
     def fabric(self):
         return self.fake
 
+    @property
+    def fabric_jobs(self):
+        return self.fake
+
     def _quiet_fabric(self):
         return self.fake
 

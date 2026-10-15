@@ -50,6 +50,9 @@ def _read(uri: str, options: dict[str, str] | None, version: int | None = None) 
     return pl.from_arrow(table.to_pyarrow_table())
 
 
+read_table_uri = _read  # any Delta table by URI: a local path, or OneLake with storage options
+
+
 class Store:
     env: str
 

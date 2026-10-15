@@ -34,7 +34,10 @@ METHODS = {"environment", "sign_in", "list_workspaces", "list_capacities", "list
            "list_shortcuts", "all_shortcuts", "create_shortcut", "delete_shortcut", "shortcut_connections",
            "meta_entity_shortcuts", "access_review", "access_set_role", "access_find_person", "access_lakehouse",
            "access_save_role", "access_delete_role", "access_who_can_read", "meta_tests", "meta_varlib",
-           "meta_publish_varlib"}
+           "meta_publish_varlib", "add_pc_schedule", "pc_schedules_for", "delete_pc_schedule",
+           "set_pc_schedule_enabled", "run_pc_schedule_now", "sync_pc_schedules", "pc_schedule_runs", "all_schedules",
+           "set_fabric_schedule_enabled", "delete_fabric_schedule", "run_fabric_item_now",
+           "xray", "xray_optimize", "xray_adopt_plan", "xray_adopt"}
 
 
 def handle(service: Service, line: str) -> dict:

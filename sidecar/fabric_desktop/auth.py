@@ -18,6 +18,9 @@ FABRIC_SCOPES = [
     "https://api.fabric.microsoft.com/Workspace.ReadWrite.All",
     "https://api.fabric.microsoft.com/Item.ReadWrite.All",
 ]
+# Running an item in Fabric (a notebook, the runner, table maintenance), now or on a schedule.
+# Asked for the first time you run or schedule something there.
+EXECUTE_SCOPES = FABRIC_SCOPES + ["https://api.fabric.microsoft.com/Item.Execute.All"]
 STORAGE_SCOPES = ["https://storage.azure.com/user_impersonation"]
 # Asked for the first time a feature needs them (one extra consent prompt, as you):
 # OneLake shortcuts and data access roles, cloud connections, and finding a person by email.
@@ -35,10 +38,11 @@ def default_cache_path() -> Path:
 
 
 class Authenticator:
-    def __init__(self, client_id: str, cache_path: Path | None = None):
+    def __init__(self, client_id: str, cache_path: Path | None = None, interactive: bool = True):
         if not client_id:
             raise ValueError("A Microsoft Entra app (client) ID is required; set FABRIC_DESKTOP_CLIENT_ID.")
         self.cache_path = cache_path or default_cache_path()
+        self.interactive = interactive  # False for scheduled runs: nobody is there to sign in
         self.cache = msal.SerializableTokenCache()
         if self.cache_path.exists():
             self.cache.deserialize(self.cache_path.read_text())
@@ -54,6 +58,9 @@ class Authenticator:
         accounts = self.app.get_accounts()
         if accounts:
             result = self.app.acquire_token_silent(scopes, account=accounts[0])
+        if not result and not self.interactive:
+            raise RuntimeError("Your Fabric sign-in has expired. Open Fabric Desktop and sign in, "
+                               "and scheduled runs will work again.")
         if not result:
             result = self.app.acquire_token_interactive(scopes)
         self._save()

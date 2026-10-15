@@ -14,7 +14,7 @@ from typing import Any
 
 import pyarrow.csv as pa_csv
 
-from .auth import ADMIN_SCOPES, Authenticator
+from .auth import ADMIN_SCOPES, EXECUTE_SCOPES, Authenticator
 from .fabric_api import FabricClient
 from . import lakehouse, sql
 from .jobs import Job, run_local
@@ -23,6 +23,8 @@ from .fabric_run import compute_check
 from .dataops_service import DataOpsMixin
 from .estate_service import EstateMixin
 from .meta_service import MetaMixin
+from .schedule_service import ScheduleMixin
+from .xray_service import XRayMixin
 from .notebook import Kernel, NotebookStore
 from .onelake import FileStore, TableCatalog
 from .publish import run_job
@@ -33,8 +35,9 @@ def data_dir() -> Path:
     return Path(base) / "FabricDesktop"
 
 
-class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin):
-    def __init__(self, client_id: str | None = None, root: Path | None = None):
+class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin, ScheduleMixin, XRayMixin):
+    def __init__(self, client_id: str | None = None, root: Path | None = None, headless: bool = False):
+        self.headless = headless  # a scheduled run: never open a sign-in window
         self._client_id = client_id or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", "")
         self.root = root or data_dir()
         self._auth: Authenticator | None = None
@@ -50,12 +53,17 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin):
     @property
     def auth(self) -> Authenticator:
         if self._auth is None:
-            self._auth = Authenticator(self._client_id)
+            self._auth = Authenticator(self._client_id, interactive=not self.headless)
         return self._auth
 
     @property
     def fabric(self) -> FabricClient:
         return FabricClient(self.auth.fabric_token)
+
+    @property
+    def fabric_jobs(self) -> FabricClient:
+        """For starting and scheduling jobs, which Fabric allows only with Item.Execute.All."""
+        return FabricClient(lambda: self.auth._token(EXECUTE_SCOPES))
 
     @property
     def history_file(self) -> Path:

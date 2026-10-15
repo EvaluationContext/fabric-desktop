@@ -14,6 +14,7 @@ from . import lakehouse
 from .meta import keys as keys_mod
 from .meta import Engine, GateError, Layer, LocalStore, OneLakeStore, Project, impact, promote
 from .meta.engine import RunResult
+from .onelake import storage_options
 from .meta.project import DEFAULT_RETENTION_DAYS, ENVIRONMENTS, validate
 from .meta.promote import promote_checks
 from .meta.store import META_LAKEHOUSE, Store
@@ -52,6 +53,10 @@ class MetaMixin:
     def _save_settings(self, **changes: Any) -> None:
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings_file.write_text(json.dumps(self._settings() | changes, indent=2), encoding="utf-8")
+
+    def _source_options(self) -> dict[str, str]:
+        """OneLake access for source tables outside the environment (adopted lakehouse tables)."""
+        return storage_options(self.auth.storage_token())  # type: ignore[attr-defined]
 
     def _project(self) -> Project:
         path = self._settings().get("meta_project")
@@ -307,9 +312,14 @@ class MetaMixin:
         if self._compute(project, env) == "fabric":  # type: ignore[attr-defined]
             store = self._store(project, env, create=env == "dev")
             return self._run_in_fabric(project, env, store, names, backfill, cascade)  # type: ignore[attr-defined]
+        return self._run_here(project, env, names, backfill, cascade)
+
+    def _run_here(self, project: Project, env: str, names: list[str] | None = None, backfill: str | None = None,
+                  cascade: bool = False) -> list[dict[str, Any]]:
+        """Run on this PC, whatever the environment's compute (schedules on this PC use it)."""
         keys_store = self._keys_store(project, env, create=env == "dev") if self._uses_keys(project, names) else None
         store = self._store(project, env, create=env == "dev")
-        engine = Engine(project, store, keys_store=keys_store)
+        engine = Engine(project, store, keys_store=keys_store, source_options=self._source_options)
         if cascade and names and len(names) == 1:
             results: list[RunResult] = engine.backfill(names[0])
         else:

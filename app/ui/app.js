@@ -266,6 +266,7 @@ async function renderHome() {
     signInCallout(),
     attention,
     h("div", { class: "home-attention", id: "home-fresh" }),
+    xrayCard(),
     h("div", { class: "home-two" },
       h("section", { class: "card pad" }, h("h2", {}, "Running now"), running),
       h("section", { class: "card pad" }, h("h2", {}, "Coming up"), upcoming)),
@@ -344,17 +345,21 @@ async function renderHome() {
       h("div", { class: "muted-text small" }, meta.unavailable?.[env] || (last ? ["Last run ", when(last.started_at)] : "")));
   }));
 
-  // Schedules live in Fabric, so they are read only when signed in, after the rest is on screen.
+  // This PC's schedules are local; Fabric's are read only when signed in, after the rest is on screen.
   const fabricEnvs = hasProject && state.user ? Object.keys(ENV_LABEL).filter((env) => envWhere(project, env).fabric) : [];
-  const lists = await Promise.all(fabricEnvs.map((env) => rpc("meta_schedules", { env }).catch(() => null)));
+  const [pcList, ...lists] = await Promise.all([rpc("pc_schedules_for", { kind: "all" }).catch(() => []),
+    ...fabricEnvs.map((env) => rpc("meta_schedules", { env }).catch(() => null))]);
   if (state.view !== "home") return;
-  const items = lists.flatMap((res, i) => (res?.schedules || []).filter((sc) => sc.enabled)
-    .map((sc) => ({ what: `Run all · ${ENV_LABEL[fabricEnvs[i]]}`, text: sc.text })));
-  upcoming.replaceWith(items.length ? h("div", { class: "home-list" }, items.map((x) => h("div", { class: "home-item row" },
-    h("span", { class: "grow" }, x.what), h("span", { class: "muted-text small" }, x.text))))
-    : h("p", { class: "muted-text" }, !state.user ? "Sign in to see schedules in Fabric."
-      : fabricEnvs.length ? "No schedules yet. Add one with Schedule on the Metadata page."
-        : "Schedules run in Fabric. Set an environment to run in Fabric (Metadata > Environments) to add one."));
+  const items = [
+    ...(pcList || []).filter((sc) => sc.enabled && sc.next_run).sort((a, b) => a.next_run.localeCompare(b.next_run))
+      .map((sc) => ({ what: sc.label, where: "This PC", text: nextRunText(sc.next_run) })),
+    ...lists.flatMap((res, i) => (res?.schedules || []).filter((sc) => sc.enabled)
+      .map((sc) => ({ what: `Run all · ${ENV_LABEL[fabricEnvs[i]]}`, where: "Fabric", text: sc.text }))),
+  ].slice(0, 6);
+  upcoming.replaceWith(h("div", {}, items.length ? h("div", { class: "home-list" }, items.map((x) => h("div", { class: "home-item row" },
+    h("span", { class: "grow" }, x.what, h("span", { class: "muted-text small" }, ` · ${x.where}`)), h("span", { class: "muted-text small" }, x.text))))
+    : h("p", { class: "muted-text" }, "Nothing scheduled. Use Schedule on a notebook or on Metadata, on this PC or in Fabric."),
+    btn("All schedules", "history", () => { monitorPage.panel = "schedules"; go("monitor"); }, "tool link small")));
 
   const shown = (notebooks || []).filter((n) => matches(n.name)).slice(0, 8);
   list.replaceWith(shown.length ? h("table", { class: "list" },
@@ -402,12 +407,14 @@ async function renderMonitor() {
         h("h2", {}, "From Fabric Desktop"),
         h("div", { class: "seg", role: "group", "aria-label": "Show" },
           h("button", { class: monitorPage.panel === "runs" ? "on" : null, onclick: () => { monitorPage.panel = "runs"; render(); } }, "Runs"),
+          h("button", { class: monitorPage.panel === "schedules" ? "on" : null, onclick: () => { monitorPage.panel = "schedules"; render(); } }, "Schedules"),
           h("button", { class: monitorPage.panel === "cost" ? "on" : null, onclick: () => { monitorPage.panel = "cost"; render(); } }, "Cost")),
         h("span", { class: "muted-text" }, monitorPage.panel === "cost" ? "Capacity each run used in Fabric, and what running on this PC saved"
+          : monitorPage.panel === "schedules" ? "Every schedule, on this PC and in Fabric, with how its last run went"
           : "Everything this app ran or started, in every environment, on this PC and in Fabric"),
         h("span", { class: "spacer" }),
         btn("Refresh", "sync", () => render(), "tool outline")),
-      monitorPage.panel === "cost" ? null : h("div", { class: "monitor-filters" },
+      monitorPage.panel !== "runs" ? null : h("div", { class: "monitor-filters" },
         h("div", { class: "row", role: "group", "aria-label": "Environment" },
           chip("env", "all", "All"), Object.entries(ENV_LABEL).map(([id, label]) => chip("env", id, label))),
         h("div", { class: "row", role: "group", "aria-label": "Where it ran" },
@@ -431,11 +438,13 @@ async function renderMonitor() {
   if (monitorPage.showFabric) dockFabricView(slot, "monitor", "monitor");
   else invoke("fabric_view_hide").catch(() => {});
   if (monitorPage.panel === "cost") { local.replaceWith(costPanel()); return; }
+  if (monitorPage.panel === "schedules") { local.replaceWith(schedulesPanel()); return; }
 
-  const [writes, meta, cloud] = await Promise.all([
+  const [writes, meta, cloud, scheduled] = await Promise.all([
     attempt(() => rpc("history")),
     rpc("meta_runs_all", { limit: 200 }).catch(() => ({ runs: [], unavailable: {} })),
     rpc("fabric_runs", { limit: 50 }).catch(() => []),  // not signed in yet
+    rpc("pc_schedule_runs", { limit: 100 }).catch(() => []),
   ]);
   if (state.view !== "monitor") return;
   const unavailable = Object.entries(meta.unavailable || {});
@@ -452,6 +461,12 @@ async function renderMonitor() {
       seconds: r.finished_at ? (new Date(r.finished_at) - new Date(r.started_at)) / 1000 : "", rows: "",
       note: r.workspace_name || "", reason: r.status === "Failed" ? r.message || "" : "",
       open: r.url ? () => openInFabric(r.url) : null,
+    })),
+    ...(scheduled || []).map((r) => ({
+      at: r.started, status: r.status === "ok" ? "ok" : r.status === "skipped" ? "skipped" : "failed", activity: r.label,
+      kind: r.trigger === "manual" ? "Schedule, run now" : "Scheduled run", env: "", where: "local", seconds: r.seconds,
+      rows: r.rows ?? "", note: r.status === "ok" ? r.message : "", reason: r.status === "ok" ? "" : r.message,
+      open: () => { monitorPage.panel = "schedules"; render(); },
     })),
     ...(writes || []).map((r) => ({
       at: r.finished_at, status: "ok", activity: r.job, kind: "Notebook write", env: "", where: "local",
@@ -1576,37 +1591,27 @@ function scheduleForm() {
 
 async function scheduleNotebook() {
   const nb = state.notebook;
-  if (!nb.lakehouse) {
-    toast("Attach a lakehouse first. The schedule runs the notebook in that lakehouse's workspace.", true);
-    return;
-  }
-  if (!(await ensureSignedIn())) return;
-  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, "Loading schedules..."));
-  const form = scheduleForm();
-
-  const show = (res) => {
-    list.replaceChildren(res.schedules.length ? h("table", { class: "mini" }, h("tbody", {}, res.schedules.map((s) => h("tr", {},
-      h("td", {}, s.enabled ? h("span", { class: "pill-s pass" }, "On") : h("span", { class: "pill-s neu" }, "Off")),
-      h("td", {}, s.text),
-      h("td", { class: "n" }, btn("Remove", "delete", async () => {
-        const next = await attempt(() => rpc("delete_notebook_schedule", { name: nb.name, lakehouse_ref: nb.lakehouse, workspace: nb.workspace, schedule_id: s.id }), "Not removed");
-        if (next) show(next);
-      }, "tool link small"))))))
-      : h("p", { class: "muted-text" }, res.published ? "No schedules yet." : "Not published yet. Adding a schedule publishes it."));
-  };
-  const add = async () => {
-    const schedule = form.value();
-    toast(`Publishing ${nb.name} and adding the schedule...`);
-    const res = await attempt(() => rpc("add_notebook_schedule", { ...notebookPayload(), schedule }), "Schedule not added");
-    if (res) { nb.dirty = false; renderChrome(); show(res); toast("Scheduled. Fabric runs the published notebook on its own capacity."); }
-  };
-  showDialog(`Schedule ${nb.name} in Fabric`, h("div", { class: "scroll" },
-    h("p", { class: "text" }, `Fabric runs the published notebook in ${publishWorkspaceName(nb)} on its own capacity, even when this PC is off. Adding a schedule publishes what is on screen first.`),
-    list, h("b", {}, "Add a schedule"), form.fields),
-  [btn("Close", null, closeDialog, "tool outline"), btn("Add schedule", "add", add, "tool primary")]);
-  form.sync();
-  const res = await attempt(() => rpc("notebook_schedules", { name: nb.name, lakehouse_ref: nb.lakehouse, workspace: nb.workspace }), "Could not read schedules");
-  if (res) show(res);
+  // Where it runs by default: the notebook's own choice, else the environment's compute.
+  const fabricDefault = nb.compute === "fabric" || (nb.compute !== "local" && state.meta?.project?.environments?.[state.env]?.compute === "fabric");
+  openScheduleDialog({
+    title: `Schedule ${nb.name}`,
+    mode: fabricDefault && nb.lakehouse ? "fabric" : "pc",
+    pc: { target: { kind: "notebook", name: nb.name }, query: { kind: "notebook", name: nb.name },
+          intro: "This PC runs the saved notebook, every cell in order, with its attached lakehouse. Save your changes first." },
+    fabric: {
+      unavailable: nb.lakehouse ? "" : "Attach a lakehouse first. Fabric runs the notebook in that lakehouse's workspace.",
+      intro: `Fabric runs the published notebook in ${publishWorkspaceName(nb)} on its own capacity, even when this PC is off. Adding a schedule publishes what is on screen first.`,
+      adding: `Publishing ${nb.name} and adding the schedule...`,
+      added: "Scheduled. Fabric runs the published notebook on its own capacity.",
+      list: () => rpc("notebook_schedules", { name: nb.name, lakehouse_ref: nb.lakehouse, workspace: nb.workspace }),
+      add: async (schedule) => {
+        const res = await rpc("add_notebook_schedule", { ...notebookPayload(), schedule });
+        nb.dirty = false; renderChrome();
+        return res;
+      },
+      remove: (id) => rpc("delete_notebook_schedule", { name: nb.name, lakehouse_ref: nb.lakehouse, workspace: nb.workspace, schedule_id: id }),
+    },
+  });
 }
 
 // ---------- Add data items ----------
@@ -1992,5 +1997,7 @@ checkComponents().finally(() => {
     render();
     trackFabricJobs();
     checkFreshness();
+    // After an update the engine lives in a new folder: point this PC's scheduled runs at it.
+    rpc("sync_pc_schedules").then((r) => r.error && toast(`Scheduled runs on this PC: ${friendlyError(r.error).text}`, true)).catch(() => {});
   }, "Could not start the Python sidecar");
 });

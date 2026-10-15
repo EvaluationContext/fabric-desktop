@@ -182,7 +182,7 @@ class Entity:
         return {
             "name": self.name, "layer": self.layer, "schema": self.schema, "table": self.table,
             "owner": s.get("owner", ""), "mode": self.mode, "watermark": s.get("load", {}).get("watermark"),
-            "source": src.get("files") or ", ".join(self.sources()) or ("custom step" if s.get("step") else ""),
+            "source": src.get("files") or src.get("from") or src.get("table") or ", ".join(self.sources()) or ("custom step" if s.get("step") else ""),
             "clean": len(s.get("clean", [])), "derive": len(s.get("derive", [])), "checks": len(s.get("check", [])),
             "custom": [kind for kind, _, _ in self.python_refs()],
             "keys": self.keys, "columns": self.columns, "surrogate_keys": keys_mod.entity_keys(self), "derived": self.derived, "hook_adds": self.hook_adds,
@@ -387,7 +387,7 @@ def check_python(ref: str) -> str | None:
 
 def source_columns(project: Project, e: Entity) -> set[str]:
     src = e.spec.get("source", {})
-    if "files" in src:
+    if "files" in src or "table" in src:
         return set(src.get("columns", e.columns))
     cols: set[str] = set()
     for s in e.sources():

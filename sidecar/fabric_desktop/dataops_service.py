@@ -93,6 +93,10 @@ class DataOpsMixin:
                 source, _ = store.read_files(project.layer(e.layer).lakehouse, src["files"])
                 if source is None:
                     problem = f"no files match {src['files']} yet"
+            elif "table" in src:
+                source = Engine(project, store, source_options=self._source_options).read_source_table(src["table"])  # type: ignore[attr-defined]
+                if source is None:
+                    problem = f"the source table {src.get('from') or src['table']} doesn't exist"
         except Exception as exc:  # the config side is still useful
             problem = str(exc)
         history = []

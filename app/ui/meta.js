@@ -92,8 +92,8 @@ async function renderMetadata() {
           ". Metadata version ", h("span", { class: "mono" }, p.version), ".")),
       h("div", { class: "head-actions" },
         btn("New entity", "add", newEntityDialog, "tool outline"),
-        inFabric(p, m.env) ? btn("Schedule", "history", () => scheduleMetaRuns(m.env), "tool outline",
-          { title: `Run every entity in ${ENV_LABEL[m.env]} on a schedule, on Fabric capacity` }) : null,
+        btn("Schedule", "history", () => scheduleMetaRuns(m.env), "tool outline",
+          { title: `Run every entity in ${ENV_LABEL[m.env]} on a schedule, on this PC or in Fabric` }),
         btn(inFabric(p, m.env) ? "Run all in Fabric" : "Run all", "play", () => runEntities(null), "tool primary",
           { disabled: p.errors.length ? true : null }))),
     problemsBanner(p.errors),
@@ -611,7 +611,7 @@ function computeChoice(env, local, fabric) {
   }, label);
   return h("div", { class: "compute-row" }, h("span", { class: "muted-text small" }, "Runs on"),
     h("div", { class: "seg" }, option("local", "This PC", !fabric), option("fabric", "Fabric", fabric)),
-    fabric ? btn("Schedules", "history", () => scheduleMetaRuns(env), "tool link small") : null);
+    btn("Schedules", "history", () => scheduleMetaRuns(env), "tool link small"));
 }
 
 async function setCompute(env, compute) {
@@ -624,32 +624,24 @@ async function setCompute(env, compute) {
   render();
 }
 
-async function scheduleMetaRuns(env) {
-  if (!(await ensureSignedIn())) return;
-  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, "Loading schedules..."));
-  const form = scheduleForm();
-  const show = (res) => {
-    list.replaceChildren(res.schedules.length ? h("table", { class: "mini" }, h("tbody", {}, res.schedules.map((s) => h("tr", {},
-      h("td", {}, s.enabled ? h("span", { class: "pill-s pass" }, "On") : h("span", { class: "pill-s neu" }, "Off")),
-      h("td", {}, s.text),
-      h("td", { class: "n" }, btn("Remove", "delete", async () => {
-        const next = await attempt(() => rpc("meta_delete_schedule", { env, schedule_id: s.id }), "Not removed");
-        if (next) show(next);
-      }, "tool link small"))))))
-      : h("p", { class: "muted-text" }, "No schedules yet."));
-  };
-  const add = async () => {
-    toast(`Uploading the project and adding the schedule for ${ENV_LABEL[env]}...`);
-    const res = await metaCall("meta_add_schedule", { env, schedule: form.value() }, "Schedule not added");
-    if (res) { show(res); toast("Scheduled. Fabric runs every entity on its own capacity, even when this PC is off."); }
-  };
-  showDialog(`Schedule ${ENV_LABEL[env]} runs in Fabric`, h("div", { class: "scroll" },
-    h("p", { class: "text" }, `Each scheduled run processes every entity in ${ENV_LABEL[env]}, in layer order, using the project as it was last uploaded (each run or promote from this app uploads it).`),
-    list, h("b", {}, "Add a schedule"), form.fields),
-  [btn("Close", null, closeDialog, "tool outline"), btn("Add schedule", "add", add, "tool primary")]);
-  form.sync();
-  const res = await attempt(() => rpc("meta_schedules", { env }), "Could not read schedules");
-  if (res) show(res);
+function scheduleMetaRuns(env) {
+  const p = state.meta.project;
+  const fabric = inFabric(p, env);
+  openScheduleDialog({
+    title: `Schedule ${ENV_LABEL[env]} runs`,
+    mode: fabric ? "fabric" : "pc",
+    pc: { target: { kind: "meta", env }, query: { kind: "meta", env },
+          intro: `This PC runs every entity in ${ENV_LABEL[env]}, in layer order, from the project files as they are when it runs.` },
+    fabric: {
+      unavailable: fabric ? "" : `${ENV_LABEL[env]} runs on this PC. Set Runs on to Fabric in Environments to schedule it there.`,
+      intro: `Fabric runs every entity in ${ENV_LABEL[env]}, in layer order, on its own capacity, using the project as it was last uploaded (each run or promote from this app uploads it).`,
+      adding: `Uploading the project and adding the schedule for ${ENV_LABEL[env]}...`,
+      added: "Scheduled. Fabric runs every entity on its own capacity, even when this PC is off.",
+      list: () => rpc("meta_schedules", { env }),
+      add: (schedule) => rpc("meta_add_schedule", { env, schedule }),
+      remove: (id) => rpc("meta_delete_schedule", { env, schedule_id: id }),
+    },
+  });
 }
 
 // Every environment has a workspace, whether this PC or Fabric runs it: pick one, or create one.

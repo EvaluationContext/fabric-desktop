@@ -15,13 +15,13 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 
 from . import keys as keys_mod
 from .project import SYSTEM_COLUMNS, Entity, GateError, Project, impact, load_python, run_order, validate
-from .store import Store
+from .store import Store, read_table_uri
 
 # Columns the quarantine adds to each held row: why, which run, when, and the row's own id.
 QUARANTINE_COLUMNS = ["_check", "_run_id", "_loaded_at", "_qid"]
@@ -151,8 +151,10 @@ class Engine:
     batch_prefix = "b-"
 
     def __init__(self, project: Project, store: Store, load_date: dt.date | None = None,
-                 keys_store: Store | None = None):
+                 keys_store: Store | None = None, source_options: Callable[[], dict[str, str] | None] | None = None):
         self.project, self.store = project, store
+        # Storage options for a source table elsewhere in OneLake ([source] table = "abfss://...").
+        self.source_options = source_options or store.options
         self.keys_store = keys_store or store  # where LH_Keys lives: the environment's Keys workspace
         self.load_date = load_date or dt.date.today()
         self.run_id = ""
@@ -168,6 +170,10 @@ class Engine:
     def read_entity(self, name: str) -> pl.DataFrame | None:
         e = self.project.entities[name]
         return self.store.read(self.lakehouse(e), e.schema, e.table)
+
+    def read_source_table(self, uri: str) -> pl.DataFrame | None:
+        """An existing Delta table the entity loads from: an adopted lakehouse table, read as it is."""
+        return read_table_uri(uri, self.source_options() if uri.startswith(("abfss://", "https://")) else None)
 
     # ---- batches
 
@@ -282,9 +288,14 @@ class Engine:
             if src.get("add_source_columns", True):
                 df = df.with_columns(pl.lit(self.load_date).alias("_load_date")) if "_load_date" in e.columns else df
         else:
-            df = self.read_entity(src["entity"])
-            if df is None:
-                raise CheckStop(f"{src['entity']} has not been loaded in {self.store.env} yet")
+            if "table" in src:
+                df = self.read_source_table(src["table"])
+                if df is None:
+                    raise CheckStop(f"the source table {src.get('from') or src['table']} doesn't exist")
+            else:
+                df = self.read_entity(src["entity"])
+                if df is None:
+                    raise CheckStop(f"{src['entity']} has not been loaded in {self.store.env} yet")
             df = df.drop([c for c in SYSTEM_COLUMNS if c in df.columns])
             detail = "full"
             wm_col = e.spec.get("load", {}).get("watermark")

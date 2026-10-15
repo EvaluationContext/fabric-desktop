@@ -191,6 +191,16 @@ class FabricClient:
         url = f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules"
         return self._request("POST", url, json={"enabled": enabled, "configuration": configuration}).json()
 
+    def update_schedule(self, workspace_id: str, item_id: str, job_type: str, schedule_id: str,
+                        enabled: bool, configuration: dict[str, Any]) -> dict[str, Any]:
+        url = f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules/{schedule_id}"
+        return self._request("PATCH", url, json={"enabled": enabled, "configuration": configuration}).json()
+
+    def list_job_instances(self, workspace_id: str, item_id: str) -> list[dict[str, Any]]:
+        """The item's job runs, newest first (Fabric keeps them for a while)."""
+        runs = self._paged(f"/workspaces/{workspace_id}/items/{item_id}/jobs/instances")
+        return sorted(runs, key=lambda r: r.get("startTimeUtc") or "", reverse=True)
+
     def delete_schedule(self, workspace_id: str, item_id: str, job_type: str, schedule_id: str) -> None:
         self._request("DELETE", f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules/{schedule_id}")
 
