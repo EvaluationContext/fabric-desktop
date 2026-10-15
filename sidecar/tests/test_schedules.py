@@ -6,7 +6,7 @@ import time
 import pytest
 
 from fabric_desktop import schedule_service
-from fabric_desktop.local_schedules import LocalSchedules, local_configuration, next_run, task_xml
+from fabric_desktop.local_schedules import LocalSchedules, local_configuration, next_run, pythonw, task_xml
 from fabric_desktop.service import Service
 
 
@@ -62,7 +62,7 @@ def test_add_list_pause_and_remove_a_notebook_schedule(svc):
         svc.add_pc_schedule({"kind": "notebook", "name": "Missing"}, {"kind": "daily", "times": ["06:00"]})
     added = svc.add_pc_schedule({"kind": "notebook", "name": "Daily load"}, {"kind": "daily", "times": ["06:00"]})
     sid = added["schedule"]["id"]
-    assert svc.fake_scheduler.tasks[sid] == (True, "C:/engine/python.exe")
+    assert svc.fake_scheduler.tasks[sid] == (True, pythonw("C:/engine/python.exe"))  # Windows writes C:\engine
     [row] = svc.pc_schedules_for("notebook", "Daily load")
     assert row["text"] == "Daily at 06:00" and row["next_run"] and row["last"] is None
     svc.set_pc_schedule_enabled(sid, False)
@@ -78,7 +78,7 @@ def test_tasks_follow_the_engine_after_an_update(tmp_path):
     old.add({"kind": "notebook", "name": "n"}, {"kind": "cron", "every_minutes": 15})
     assert LocalSchedules(tmp_path, fake, "C:/engine/old/python.exe").sync() == 0
     assert LocalSchedules(tmp_path, fake, "C:/engine/new/python.exe").sync() == 1
-    assert list(fake.tasks.values()) == [(True, "C:/engine/new/python.exe")]
+    assert list(fake.tasks.values()) == [(True, pythonw("C:/engine/new/python.exe"))]
 
 
 def test_scheduled_notebook_runs_and_logs_its_result(svc):
