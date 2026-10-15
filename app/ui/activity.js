@@ -44,6 +44,7 @@ function friendlyError(err) {
   const raw = String(err?.message || err || "").trim();
   const known = [
     [/FABRIC_DESKTOP_CLIENT_ID|client\) ID is required/i, "Sign-in isn't set up on this PC yet. The app needs its Entra app registration (see the README)."],
+    [/InsufficientScopes|AADSTS65001|consent_required/i, "The app's Entra registration is missing a permission this needs. Add the one named in Details (for running or scheduling in Fabric it is Item.Execute.All under Power BI Service), grant consent, then sign in again."],
     [/AADSTS|invalid_grant|interaction_required|\b401\b|Unauthorized|token.*expired/i, "Your sign-in expired. Sign in again and retry."],
     [/\b403\b|Forbidden|InsufficientPrivileges|PrincipalTypeNotSupported/i, "You don't have permission for that in this workspace. A workspace admin can make you a Contributor or above."],
     [/\b404\b|NotFound|ItemNotFound|does not exist/i, "Fabric couldn't find that item. It may have been deleted or renamed."],

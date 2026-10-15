@@ -155,8 +155,9 @@ class FakeFabric:
         self.calls = []
         self.models = []
 
-    def run_table_maintenance(self, ws, lh, table, schema):
+    def run_table_maintenance(self, ws, lh, table, schema, vacuum_retention=None):
         self.calls.append(("maintenance", lh, f"{schema}.{table}"))
+        self.retention = vacuum_retention
         return f"job-{table}"
 
     def job_instance(self, ws, item, job):
@@ -183,6 +184,10 @@ class CloudService(Service):
 
     @property
     def fabric(self):
+        return self.fake
+
+    @property
+    def fabric_jobs(self):
         return self.fake
 
     def _quiet_fabric(self):

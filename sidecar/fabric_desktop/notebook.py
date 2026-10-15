@@ -210,9 +210,11 @@ def _routers() -> tuple[_Router, _Router]:
 
 class Kernel:
     def __init__(self, token: Callable[[str], str] | None = None,
-                 load_notebook: Callable[[str], list[dict[str, Any]]] | None = None):
+                 load_notebook: Callable[[str], list[dict[str, Any]]] | None = None,
+                 variable_libraries: Callable[[str], dict[str, str] | None] | None = None):
         self.token = token
         self.load_notebook = load_notebook
+        self.variable_libraries = variable_libraries
         self.notebook_name = ""
         self._current: _Run | None = None
         self._local = threading.local()
@@ -225,7 +227,8 @@ class Kernel:
         from . import notebookutils_local
         ns: dict[str, Any] = {"__name__": "__main__", "input": _no_input, "display": self._display}
         utils = notebookutils_local.build(notebookutils_local.Host(
-            token=self.token, run_notebook=self.run_notebook, notebook_name=lambda: self.notebook_name))
+            token=self.token, run_notebook=self.run_notebook, notebook_name=lambda: self.notebook_name,
+            variables=self.variable_libraries))
         get_secret = utils.credentials.getSecret
 
         def remembered_secret(*args: Any, **kwargs: Any) -> str:

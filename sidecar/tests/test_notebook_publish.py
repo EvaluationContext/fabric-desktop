@@ -47,6 +47,10 @@ class NotebookService(Service):
     def fabric(self):
         return self.fake
 
+    @property
+    def fabric_jobs(self):
+        return self.fake
+
 
 @pytest.fixture
 def svc(tmp_path):

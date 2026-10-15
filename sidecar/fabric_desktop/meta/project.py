@@ -32,6 +32,9 @@ from . import freshness as freshness_mod
 from . import keys as keys_mod
 
 MAX_LAYERS = 10
+# Fabric's table maintenance won't VACUUM with less than 7 days' retention.
+DEFAULT_RETENTION_DAYS = 7
+MAX_RETENTION_DAYS = 3650
 SYSTEM_COLUMNS = ["_run_id", "_loaded_at"]
 SCD2_COLUMNS = ["valid_from", "valid_to", "is_current", "row_hash"]
 DRIFT_POLICIES = ("evolve", "ignore_new", "strict")
@@ -70,6 +73,7 @@ class Layer:
     reads_from: list[str] = field(default_factory=list)  # empty: any earlier layer
     description: str = ""
     require_keys: bool = False  # every table in the layer must take surrogate keys from LH_Keys
+    retention_days: int = DEFAULT_RETENTION_DAYS  # how far back its tables can be restored (VACUUM keeps this long)
 
     @property
     def lakehouse(self) -> str:
@@ -78,7 +82,7 @@ class Layer:
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "drift": self.drift, "required_checks": self.required_checks,
                 "reads_from": self.reads_from, "description": self.description, "lakehouse": self.lakehouse,
-                "require_keys": self.require_keys}
+                "require_keys": self.require_keys, "retention_days": self.retention_days}
 
 
 @dataclass
@@ -178,7 +182,7 @@ class Entity:
         return {
             "name": self.name, "layer": self.layer, "schema": self.schema, "table": self.table,
             "owner": s.get("owner", ""), "mode": self.mode, "watermark": s.get("load", {}).get("watermark"),
-            "source": src.get("files") or ", ".join(self.sources()) or ("custom step" if s.get("step") else ""),
+            "source": src.get("files") or src.get("from") or src.get("table") or ", ".join(self.sources()) or ("custom step" if s.get("step") else ""),
             "clean": len(s.get("clean", [])), "derive": len(s.get("derive", [])), "checks": len(s.get("check", [])),
             "custom": [kind for kind, _, _ in self.python_refs()],
             "keys": self.keys, "columns": self.columns, "surrogate_keys": keys_mod.entity_keys(self), "derived": self.derived, "hook_adds": self.hook_adds,
@@ -201,6 +205,8 @@ def write_layers_file(root: Path, layers: list[Layer], rules: dict[str, Any]) ->
             lines.append(f"description = {json.dumps(l.description)}")
         if l.require_keys:
             lines.append("require_keys = true")
+        if l.retention_days != DEFAULT_RETENTION_DAYS:
+            lines.append(f"retention_days = {int(l.retention_days)}")
         lines.append("")
     (Path(root) / "layers.toml").write_text("\n".join(lines), encoding="utf-8")
 
@@ -303,6 +309,9 @@ class Project:
                 problems.append(f"layer name {l.name!r} must be lowercase letters, digits or _ and start with a letter")
             if l.drift not in DRIFT_POLICIES:
                 problems.append(f"layer {l.name}: drift must be one of {', '.join(DRIFT_POLICIES)}")
+            if not isinstance(l.retention_days, int) or not DEFAULT_RETENTION_DAYS <= l.retention_days <= MAX_RETENTION_DAYS:
+                problems.append(f"layer {l.name}: keep versions for {DEFAULT_RETENTION_DAYS} to {MAX_RETENTION_DAYS} days "
+                                f"(Fabric needs at least {DEFAULT_RETENTION_DAYS})")
         for e in self.entities.values():
             if e.layer not in names:
                 problems.append(f"layer {e.layer} still has entities: {e.name}")
@@ -378,7 +387,7 @@ def check_python(ref: str) -> str | None:
 
 def source_columns(project: Project, e: Entity) -> set[str]:
     src = e.spec.get("source", {})
-    if "files" in src:
+    if "files" in src or "table" in src:
         return set(src.get("columns", e.columns))
     cols: set[str] = set()
     for s in e.sources():

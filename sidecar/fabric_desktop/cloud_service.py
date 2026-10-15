@@ -22,7 +22,7 @@ from . import maintenance, profiling, semantic
 from .auth import FABRIC_SCOPES, STORAGE_SCOPES
 from .fabric_api import FabricClient
 from .fabric_compute import BUNDLE_DIR, RESULTS_DIR, RUNNER, bundle_files, bundle_hash, run_parameters, runner_ipynb
-from .fabric_run import TERMINAL, describe_schedule, fabric_ipynb, schedule_configuration
+from .fabric_run import TERMINAL, describe_schedule, fabric_ipynb, schedule_configuration, uses_local_module, uses_spark
 from .meta.engine import Engine, RunResult, apply_clean
 from .meta.project import ENVIRONMENTS, GateError, validate
 from .meta.store import META_LAKEHOUSE, META_SCHEMAS, LocalStore, OneLakeStore
@@ -128,7 +128,7 @@ class CloudMixin:
         return {"runs": runs[:limit], "unavailable": unavailable}
 
     def cancel_fabric_run(self, workspace_id: str, item_id: str, job_id: str) -> dict[str, Any]:
-        self.fabric.cancel_job(workspace_id, item_id, job_id)  # type: ignore[attr-defined]
+        self.fabric_jobs.cancel_job(workspace_id, item_id, job_id)  # type: ignore[attr-defined]
         return {"cancelled": job_id}
 
     # ---- notebooks in Fabric
@@ -166,9 +166,11 @@ class CloudMixin:
                                compute: str | None = None, workspace: dict[str, str] | None = None) -> dict[str, Any]:
         """Publish the notebook, then run it on its workspace's Fabric capacity."""
         item = self._publish(name, cells, lakehouse_ref, compute, workspace)
-        job_id = self.fabric.run_item_job(item["workspace_id"], item["id"], NOTEBOOK_JOB)  # type: ignore[attr-defined]
+        job_id = self.fabric_jobs.run_item_job(item["workspace_id"], item["id"], NOTEBOOK_JOB)  # type: ignore[attr-defined]
+        # As published: a Python notebook, or Spark (what the cost view counts it as).
+        engine = "python" if lakehouse_ref and uses_local_module(cells) and not uses_spark(cells) else "spark"
         return self._log_fabric_run({"kind": "Notebook run", "name": name, "workspace_id": item["workspace_id"],
-                                     "workspace_name": item["workspace_name"],
+                                     "workspace_name": item["workspace_name"], "engine": engine,
                                      "item_id": item["id"], "job_id": job_id, "url": item["url"]})
 
     def _notebook_item(self, name: str, workspace_id: str) -> dict[str, Any] | None:
@@ -195,7 +197,7 @@ class CloudMixin:
                                         schedule.get("every_minutes"), schedule.get("weekdays"),
                                         schedule.get("time_zone") or "UTC")
         item = self._publish(name, cells, lakehouse_ref, compute, workspace)
-        self.fabric.create_schedule(item["workspace_id"], item["id"], NOTEBOOK_JOB, config)  # type: ignore[attr-defined]
+        self.fabric_jobs.create_schedule(item["workspace_id"], item["id"], NOTEBOOK_JOB, config)  # type: ignore[attr-defined]
         return self.notebook_schedules(name, lakehouse_ref)
 
     def delete_notebook_schedule(self, name: str, schedule_id: str, lakehouse_ref: dict[str, str] | None = None,
@@ -204,7 +206,7 @@ class CloudMixin:
         item = self._notebook_item(name, ws["workspace_id"])
         if item is None:
             raise LookupError(f"{name} isn't published in {ws['workspace_name'] or 'that workspace'}")
-        self.fabric.delete_schedule(ws["workspace_id"], item["id"], NOTEBOOK_JOB, schedule_id)  # type: ignore[attr-defined]
+        self.fabric_jobs.delete_schedule(ws["workspace_id"], item["id"], NOTEBOOK_JOB, schedule_id)  # type: ignore[attr-defined]
         return self.notebook_schedules(name, lakehouse_ref)
 
     # ---- table health and maintenance for the metadata project's tables
@@ -220,12 +222,12 @@ class CloudMixin:
 
     def _managed_tables(self, project: Any, include_meta: bool = True) -> list[dict[str, str]]:
         rows = [{"entity": e.name, "lakehouse": project.layer(e.layer).lakehouse, "schema": e.schema,
-                 "table": e.table, "layer": e.layer}
+                 "table": e.table, "layer": e.layer, "retention_days": project.layer(e.layer).retention_days}
                 for e in sorted(project.entities.values(), key=lambda x: (project.layer_index(x.layer), x.name))
                 if e.layer in project.layer_names()]
         if include_meta:
-            rows += [{"entity": f"meta.{t}", "lakehouse": META_LAKEHOUSE, "schema": "meta", "table": t, "layer": ""}
-                     for t in META_SCHEMAS]
+            rows += [{"entity": f"meta.{t}", "lakehouse": META_LAKEHOUSE, "schema": "meta", "table": t, "layer": "",
+                      "retention_days": maintenance.RETENTION_HOURS // 24} for t in META_SCHEMAS]
         return rows
 
     def meta_health(self, env: str = "dev") -> dict[str, Any]:
@@ -250,12 +252,18 @@ class CloudMixin:
         for t in rows:
             label = f"{t['schema']}.{t['table']}"
             try:
+                days = t.get("retention_days") or maintenance.RETENTION_HOURS // 24
                 if isinstance(store, LocalStore):
-                    result = maintenance.compact_local(store.uri(t["lakehouse"], t["schema"], t["table"]))
+                    result = maintenance.compact_local(store.uri(t["lakehouse"], t["schema"], t["table"]), days)
                     out.append({"table": label, "status": "Completed", **result})
                     continue
                 lh_id = store.lakehouse_ids[t["lakehouse"]]
-                job_id = self.fabric.run_table_maintenance(store.workspace_id, lh_id, t["table"], t["schema"])  # type: ignore[attr-defined]
+                try:  # so Fabric's own engines keep the same history; the job below vacuums with it too
+                    maintenance.set_retention(store.uri(t["lakehouse"], t["schema"], t["table"]), days, store.options())
+                except Exception:  # noqa: BLE001 - the maintenance job still runs with the right retention
+                    pass
+                job_id = self.fabric_jobs.run_table_maintenance(  # type: ignore[attr-defined]
+                    store.workspace_id, lh_id, t["table"], t["schema"], vacuum_retention=maintenance.fabric_retention(days))
                 out.append(self._log_fabric_run({
                     "kind": "Table maintenance", "name": f"{t['lakehouse']} {label}", "env": env, "table": label,
                     "workspace_id": store.workspace_id, "item_id": lh_id, "job_id": job_id}))
@@ -369,7 +377,7 @@ class CloudMixin:
         where = self._fabric_bundle(project, env, store)
         request_id = f"fd-{dt.datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
         label = ", ".join(names) if names else f"all {len(project.entities)} entities"
-        job_id = self.fabric.run_item_job(where["workspace_id"], where["runner_id"], "RunNotebook",  # type: ignore[attr-defined]
+        job_id = self.fabric_jobs.run_item_job(where["workspace_id"], where["runner_id"], "RunNotebook",  # type: ignore[attr-defined]
                                           run_parameters(names, backfill, cascade, request_id))
         self._log_fabric_run({"kind": "Metadata run", "name": label, "env": env, "workspace_id": where["workspace_id"],
                               "workspace_name": self._env_cfg(project, env).get("workspace_name", ""),
@@ -414,7 +422,7 @@ class CloudMixin:
         store = self._store(project, env, create=env == "dev")  # type: ignore[attr-defined]
         self._check_runnable(project, store)
         where = self._fabric_bundle(project, env, store)
-        self.fabric.create_schedule(where["workspace_id"], where["runner_id"], "RunNotebook", config)  # type: ignore[attr-defined]
+        self.fabric_jobs.create_schedule(where["workspace_id"], where["runner_id"], "RunNotebook", config)  # type: ignore[attr-defined]
         return self.meta_schedules(env)
 
     def meta_delete_schedule(self, env: str, schedule_id: str) -> dict[str, Any]:
@@ -423,7 +431,7 @@ class CloudMixin:
         runner = self._notebook_item(RUNNER, ws) if ws else None
         if runner is None:
             raise LookupError(f"There is no runner notebook in the {env.title()} workspace")
-        self.fabric.delete_schedule(ws, runner["id"], "RunNotebook", schedule_id)  # type: ignore[attr-defined]
+        self.fabric_jobs.delete_schedule(ws, runner["id"], "RunNotebook", schedule_id)  # type: ignore[attr-defined]
         return self.meta_schedules(env)
 
     # ---- Direct Lake semantic model over a layer

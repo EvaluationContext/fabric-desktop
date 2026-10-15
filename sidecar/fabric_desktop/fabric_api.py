@@ -191,6 +191,16 @@ class FabricClient:
         url = f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules"
         return self._request("POST", url, json={"enabled": enabled, "configuration": configuration}).json()
 
+    def update_schedule(self, workspace_id: str, item_id: str, job_type: str, schedule_id: str,
+                        enabled: bool, configuration: dict[str, Any]) -> dict[str, Any]:
+        url = f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules/{schedule_id}"
+        return self._request("PATCH", url, json={"enabled": enabled, "configuration": configuration}).json()
+
+    def list_job_instances(self, workspace_id: str, item_id: str) -> list[dict[str, Any]]:
+        """The item's job runs, newest first (Fabric keeps them for a while)."""
+        runs = self._paged(f"/workspaces/{workspace_id}/items/{item_id}/jobs/instances")
+        return sorted(runs, key=lambda r: r.get("startTimeUtc") or "", reverse=True)
+
     def delete_schedule(self, workspace_id: str, item_id: str, job_type: str, schedule_id: str) -> None:
         self._request("DELETE", f"/workspaces/{workspace_id}/items/{item_id}/jobs/{job_type}/schedules/{schedule_id}")
 
@@ -232,3 +242,80 @@ class FabricClient:
         """Ask the lakehouse's SQL analytics endpoint to pick up tables written from outside Fabric."""
         url = f"/workspaces/{workspace_id}/sqlEndpoints/{sql_endpoint_id}/refreshMetadata"
         return self._wait(self._request("POST", url, json={}))
+
+    # ---- workspaces: who has access
+
+    def get_workspace(self, workspace_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/workspaces/{workspace_id}").json()
+
+    def list_role_assignments(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Workspace roles: [{id, principal: {id, displayName, type, userDetails...}, role}]."""
+        return self._paged(f"/workspaces/{workspace_id}/roleAssignments")
+
+    def add_role_assignment(self, workspace_id: str, principal_id: str, principal_type: str, role: str) -> dict[str, Any]:
+        body = {"principal": {"id": principal_id, "type": principal_type}, "role": role}
+        return self._request("POST", f"/workspaces/{workspace_id}/roleAssignments", json=body).json()
+
+    def update_role_assignment(self, workspace_id: str, assignment_id: str, role: str) -> dict[str, Any]:
+        url = f"/workspaces/{workspace_id}/roleAssignments/{assignment_id}"
+        resp = self._request("PATCH", url, json={"role": role})
+        return resp.json() if resp.content else {}
+
+    def delete_role_assignment(self, workspace_id: str, assignment_id: str) -> None:
+        self._request("DELETE", f"/workspaces/{workspace_id}/roleAssignments/{assignment_id}")
+
+    # ---- OneLake security: data access roles on a lakehouse
+
+    def list_data_access_roles(self, workspace_id: str, item_id: str) -> list[dict[str, Any]]:
+        return self._paged(f"/workspaces/{workspace_id}/items/{item_id}/dataAccessRoles")
+
+    def put_data_access_roles(self, workspace_id: str, item_id: str, roles: list[dict[str, Any]]) -> None:
+        """Replace every data access role on the item with ``roles``."""
+        self._request("PUT", f"/workspaces/{workspace_id}/items/{item_id}/dataAccessRoles", json={"value": roles})
+
+    # ---- OneLake shortcuts
+
+    def list_shortcuts(self, workspace_id: str, item_id: str) -> list[dict[str, Any]]:
+        return self._paged(f"/workspaces/{workspace_id}/items/{item_id}/shortcuts")
+
+    def create_shortcut(self, workspace_id: str, item_id: str, path: str, name: str,
+                        target: dict[str, Any]) -> dict[str, Any]:
+        """``path`` is where it goes in the lakehouse ("Tables/dbo" or "Files/..."); ``target`` is
+        {"oneLake": {...}}, {"adlsGen2": {...}} or {"amazonS3": {...}}."""
+        body = {"path": path, "name": name, "target": target}
+        return self._request("POST", f"/workspaces/{workspace_id}/items/{item_id}/shortcuts",
+                             params={"shortcutConflictPolicy": "Abort"}, json=body).json()
+
+    def delete_shortcut(self, workspace_id: str, item_id: str, path: str, name: str) -> None:
+        self._request("DELETE", f"/workspaces/{workspace_id}/items/{item_id}/shortcuts/{path.strip('/')}/{name}")
+
+    def list_connections(self) -> list[dict[str, Any]]:
+        """Cloud connections the user can use (ADLS Gen2 and S3 shortcuts need one)."""
+        return self._paged("/connections")
+
+    # ---- variable libraries
+
+    def list_variable_libraries(self, workspace_id: str) -> list[dict[str, Any]]:
+        return self._paged(f"/workspaces/{workspace_id}/variableLibraries")
+
+    def save_variable_library(self, workspace_id: str, name: str, parts: dict[str, str],
+                              description: str = "") -> dict[str, Any]:
+        """Create the variable library from its definition files, or replace the one with this name."""
+        definition = {"parts": [{"path": path, "payload": base64.b64encode(text.encode()).decode(),
+                                 "payloadType": "InlineBase64"} for path, text in parts.items()]}
+        existing = next((v for v in self.list_variable_libraries(workspace_id) if v["displayName"] == name), None)
+        if existing is None:
+            body: dict[str, Any] = {"displayName": name, "definition": definition}
+            if description:
+                body["description"] = description
+            created = self._wait(self._request("POST", f"/workspaces/{workspace_id}/variableLibraries", json=body))
+            if not created.get("id"):
+                created = next((v for v in self.list_variable_libraries(workspace_id) if v["displayName"] == name), created)
+            return created | {"created": True}
+        url = f"/workspaces/{workspace_id}/variableLibraries/{existing['id']}/updateDefinition"
+        self._wait(self._request("POST", url, json={"definition": definition}))
+        return existing | {"created": False}
+
+    def set_active_value_set(self, workspace_id: str, library_id: str, value_set: str) -> None:
+        self._request("PATCH", f"/workspaces/{workspace_id}/variableLibraries/{library_id}",
+                      json={"properties": {"activeValueSetName": value_set}})

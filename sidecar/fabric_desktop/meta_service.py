@@ -14,7 +14,8 @@ from . import lakehouse
 from .meta import keys as keys_mod
 from .meta import Engine, GateError, Layer, LocalStore, OneLakeStore, Project, impact, promote
 from .meta.engine import RunResult
-from .meta.project import ENVIRONMENTS, validate
+from .onelake import storage_options
+from .meta.project import DEFAULT_RETENTION_DAYS, ENVIRONMENTS, validate
 from .meta.promote import promote_checks
 from .meta.store import META_LAKEHOUSE, Store
 from .meta.templates import TEMPLATES, describe, entity_text, init_project
@@ -22,6 +23,16 @@ from .meta.templates import TEMPLATES, describe, entity_text, init_project
 
 def _json_rows(df: pl.DataFrame, limit: int) -> list[dict[str, Any]]:
     return json.loads(df.head(limit).write_json())
+
+
+def _days(value: Any) -> Any:
+    """A whole number of days from the UI; anything else is left for the save gate to refuse."""
+    if value in (None, ""):
+        return DEFAULT_RETENTION_DAYS
+    try:
+        return int(value) if float(value) == int(float(value)) else value
+    except (TypeError, ValueError):
+        return value
 
 
 class MetaMixin:
@@ -42,6 +53,10 @@ class MetaMixin:
     def _save_settings(self, **changes: Any) -> None:
         self.settings_file.parent.mkdir(parents=True, exist_ok=True)
         self.settings_file.write_text(json.dumps(self._settings() | changes, indent=2), encoding="utf-8")
+
+    def _source_options(self) -> dict[str, str]:
+        """OneLake access for source tables outside the environment (adopted lakehouse tables)."""
+        return storage_options(self.auth.storage_token())  # type: ignore[attr-defined]
 
     def _project(self) -> Project:
         path = self._settings().get("meta_project")
@@ -284,7 +299,8 @@ class MetaMixin:
         project.set_layers([Layer(name=l["name"].strip().lower(), drift=l.get("drift", "ignore_new"),
                                   required_checks=list(l.get("required_checks", [])),
                                   reads_from=list(l.get("reads_from", [])), description=l.get("description", ""),
-                                  require_keys=bool(l.get("require_keys", False)))
+                                  require_keys=bool(l.get("require_keys", False)),
+                                  retention_days=_days(l.get("retention_days")))
                             for l in layers])
         return self.meta_project()
 
@@ -296,9 +312,14 @@ class MetaMixin:
         if self._compute(project, env) == "fabric":  # type: ignore[attr-defined]
             store = self._store(project, env, create=env == "dev")
             return self._run_in_fabric(project, env, store, names, backfill, cascade)  # type: ignore[attr-defined]
+        return self._run_here(project, env, names, backfill, cascade)
+
+    def _run_here(self, project: Project, env: str, names: list[str] | None = None, backfill: str | None = None,
+                  cascade: bool = False) -> list[dict[str, Any]]:
+        """Run on this PC, whatever the environment's compute (schedules on this PC use it)."""
         keys_store = self._keys_store(project, env, create=env == "dev") if self._uses_keys(project, names) else None
         store = self._store(project, env, create=env == "dev")
-        engine = Engine(project, store, keys_store=keys_store)
+        engine = Engine(project, store, keys_store=keys_store, source_options=self._source_options)
         if cascade and names and len(names) == 1:
             results: list[RunResult] = engine.backfill(names[0])
         else:
@@ -339,16 +360,19 @@ class MetaMixin:
             errors = promote_checks(project, self._store(project, source), target, dt.date.today())
         except LookupError as exc:
             errors = [str(exc)]
+        test_errors, tests = self._test_gate(project)  # type: ignore[attr-defined]
+        errors += test_errors
         cfg = project.environments.get(target, {})
         if (project.key_tables or project.source_systems) and cfg.get("target", "onelake") != "local" \
                 and not cfg.get("keys_workspace_id"):
             errors.append(f"Pick a Keys workspace for {target.title()} first (Metadata > Surrogate keys)")
-        return {"source": source, "target": target, "version": project.version, "errors": errors}
+        return {"source": source, "target": target, "version": project.version, "errors": errors, "tests": tests}
 
     def meta_promote(self, source: str, target: str) -> dict[str, Any]:
         project = self._project()
         src = self._store(project, source)
         errors = promote_checks(project, src, target, dt.date.today())
+        errors += self._test_gate(project)[0]  # type: ignore[attr-defined]  # custom code is tested before it moves on
         if errors:
             raise GateError("promote", errors)
         target_store = self._store(project, target, create=True)
@@ -358,6 +382,12 @@ class MetaMixin:
         if keys_store is not None:
             # Each environment issues its own keys; promote copies the source systems and seeds new key tables.
             result["keys"] = keys_mod.sync(project, keys_store)
+        if project.source_systems and project.environments.get(target, {}).get("workspace_id"):
+            try:  # so notebooks in the target read its own connections from VL_Sources
+                self._publish_varlib(project, target)  # type: ignore[attr-defined]
+                result["variable_library"] = "updated"
+            except Exception as exc:  # the promote itself worked; publish it from Source systems
+                result["variable_library"] = f"not updated: {exc}"
         if self._compute(project, target) == "fabric":  # type: ignore[attr-defined]
             try:  # so scheduled runs in Fabric pick up the promoted version
                 self._fabric_bundle(project, target, target_store)  # type: ignore[attr-defined]

@@ -57,7 +57,7 @@ def detect(project: Project, e: Entity, source: pl.DataFrame | None) -> dict[str
     from .engine import polars_type  # the engine owns the contract type names
     layer_policy = project.layer(e.layer).drift
     out: dict[str, Any] = {"entity": e.name, "source": e.spec.get("source", {}).get("entity") or
-                           e.spec.get("source", {}).get("files") or "", "added": [], "dropped": [], "retyped": [],
+                           e.spec.get("source", {}).get("files") or e.spec.get("source", {}).get("from") or "", "added": [], "dropped": [], "retyped": [],
                            "policy": e.spec.get("contract", {}).get("drift") or layer_policy,
                            "own_policy": e.spec.get("contract", {}).get("drift"), "layer_policy": layer_policy,
                            "checked": source is not None}
