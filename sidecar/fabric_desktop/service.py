@@ -19,6 +19,7 @@ from .fabric_api import FabricClient
 from . import lakehouse, sql
 from .jobs import Job, run_local
 from .cloud_service import CloudMixin
+from .fabric_run import compute_check
 from .dataops_service import DataOpsMixin
 from .meta_service import MetaMixin
 from .notebook import Kernel, NotebookStore
@@ -315,11 +316,13 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin):
         return self.notebooks.new()
 
     def open_notebook(self, name: str) -> dict[str, Any]:
-        return self.notebooks.load(name)
+        nb = self.notebooks.load(name)
+        return nb | {"check": compute_check(nb["cells"], nb["lakehouse"])}
 
     def save_notebook(self, name: str, cells: list[dict[str, Any]],
-                      lakehouse_ref: dict[str, str] | None = None) -> dict[str, Any]:
-        return self.notebooks.save(name, cells, lakehouse_ref)
+                      lakehouse_ref: dict[str, str] | None = None, compute: str | None = None) -> dict[str, Any]:
+        """Save the notebook, and say whether it can run on this PC and in Fabric as it now stands."""
+        return self.notebooks.save(name, cells, lakehouse_ref, compute) | {"check": compute_check(cells, lakehouse_ref)}
 
     def rename_notebook(self, name: str, new_name: str) -> dict[str, Any]:
         return self.notebooks.rename(name, new_name)

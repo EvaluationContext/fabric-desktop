@@ -136,6 +136,56 @@ def fabric_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None,
     return nb
 
 
+# ---- where a notebook can run
+
+# Code that needs Fabric's Spark runtime or its notebook services. The local kernel runs plain Python.
+_FABRIC_ONLY = [
+    (re.compile(r"^\s*%%(pyspark|spark|sparkr|csharp|configure)\b", re.M), "uses a Spark cell magic"),
+    (re.compile(r"^\s*%run\b", re.M), "runs another Fabric notebook with %run"),
+    (re.compile(r"\b(from|import)\s+pyspark\b"), "imports PySpark"),
+    (re.compile(r"\bspark\s*\.\s*\w"), "uses the Spark session (spark.)"),
+    (re.compile(r"\b(mssparkutils|notebookutils)\b"), "uses Fabric notebook utilities"),
+]
+_SQL_WRITE = re.compile(r"\b(MERGE\s+INTO|INSERT\s+(INTO|OVERWRITE)|UPDATE|DELETE\s+FROM)\b", re.I)
+# A path on this PC's disk, like C:\data or D:/exports. Fabric can't reach it.
+_LOCAL_PATH = re.compile(r"""["'][A-Za-z]:[\\/]""")
+
+
+def _snippet(source: str, match: re.Match[str] | None = None) -> str:
+    """The line that matched (or the first line), short enough to quote."""
+    start = source.rfind("\n", 0, match.start()) + 1 if match else 0
+    line = next((ln.strip() for ln in source[start:].splitlines() if ln.strip()), "")
+    return line if len(line) <= 60 else line[:57] + "..."
+
+
+def compute_check(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None) -> dict[str, Any]:
+    """Whether a notebook can run on this PC and in Fabric, and if not, which cells stop it.
+
+    Each side is {"ok": bool, "reasons": [{"cell": n, "text": ..., "code": first line}]}, cells numbered from 1
+    among all cells, as the notebook shows them."""
+    local: list[dict[str, Any]] = []
+    fabric: list[dict[str, Any]] = []
+    for n, c in enumerate(cells, 1):
+        source = c.get("source", "")
+        if c.get("type") == "markdown" or not source.strip():
+            continue
+        if source.lstrip().startswith("%%sql"):
+            if _SQL_WRITE.search(source):
+                local.append({"cell": n, "text": "changes tables with Spark SQL, which runs in Fabric only",
+                              "code": _snippet(source)})
+        else:
+            hit = next(((m, text) for rx, text in _FABRIC_ONLY if (m := rx.search(source))), None)
+            if hit:
+                local.append({"cell": n, "text": hit[1], "code": _snippet(source, hit[0])})
+        if m := _LOCAL_PATH.search(source):
+            fabric.append({"cell": n, "text": "reads or writes a path on this PC, which Fabric can't reach",
+                           "code": _snippet(source, m)})
+    if not lakehouse:
+        fabric.insert(0, {"cell": None, "text": "has no lakehouse attached. A Fabric run happens in the attached "
+                                                "lakehouse's workspace.", "code": ""})
+    return {"local": {"ok": not local, "reasons": local}, "fabric": {"ok": not fabric, "reasons": fabric}}
+
+
 # ---- schedules
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]

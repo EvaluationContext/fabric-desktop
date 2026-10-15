@@ -125,7 +125,11 @@ def check_notebook_name(name: str) -> str:
     return name
 
 
-def to_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None) -> dict[str, Any]:
+COMPUTE = ("default", "local", "fabric")
+
+
+def to_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None,
+             compute: str = "default") -> dict[str, Any]:
     nb_cells = []
     for c in cells:
         cell = {"cell_type": "markdown" if c.get("type") == "markdown" else "code",
@@ -137,8 +141,10 @@ def to_ipynb(cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None) -> d
         "kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"},
         "language_info": {"name": "python"},
     }
+    if compute != "default":
+        metadata["fabric_desktop"] = {"compute": compute}
     if lakehouse:
-        metadata["fabric_desktop"] = {"lakehouse": lakehouse}
+        metadata.setdefault("fabric_desktop", {})["lakehouse"] = lakehouse
         # Fabric reads this to show the default lakehouse when the notebook is published.
         metadata["dependencies"] = {"lakehouse": {
             "default_lakehouse": lakehouse["lakehouse_id"],
@@ -154,8 +160,9 @@ def from_ipynb(nb: dict[str, Any]) -> dict[str, Any]:
         source = c.get("source", "")
         cells.append({"type": "markdown" if c.get("cell_type") == "markdown" else "code",
                       "source": "".join(source) if isinstance(source, list) else source})
-    lakehouse = nb.get("metadata", {}).get("fabric_desktop", {}).get("lakehouse")
-    return {"cells": cells, "lakehouse": lakehouse}
+    ours = nb.get("metadata", {}).get("fabric_desktop", {})
+    compute = ours.get("compute") if ours.get("compute") in COMPUTE else "default"
+    return {"cells": cells, "lakehouse": ours.get("lakehouse"), "compute": compute}
 
 
 class NotebookStore:
@@ -175,10 +182,17 @@ class NotebookStore:
         nb = json.loads(self.path(name).read_text(encoding="utf-8"))
         return {"name": name, **from_ipynb(nb)}
 
-    def save(self, name: str, cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None = None) -> dict[str, Any]:
+    def save(self, name: str, cells: list[dict[str, Any]], lakehouse: dict[str, Any] | None = None,
+             compute: str | None = None) -> dict[str, Any]:
+        """Save the notebook. ``compute`` is where Run all runs it: "local" (this PC), "fabric",
+        or "default" (whatever the environment picked in the top bar runs on). None keeps the saved choice."""
         path = self.path(name)
+        if compute is None:
+            compute = self.load(name)["compute"] if path.exists() else "default"
+        if compute not in COMPUTE:
+            raise ValueError(f"compute is one of {', '.join(COMPUTE)}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(to_ipynb(cells, lakehouse), indent=1), encoding="utf-8")
+        path.write_text(json.dumps(to_ipynb(cells, lakehouse, compute), indent=1), encoding="utf-8")
         return {"name": name}
 
     def new(self, prefix: str = "Notebook") -> dict[str, Any]:
