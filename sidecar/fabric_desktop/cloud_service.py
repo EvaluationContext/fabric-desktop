@@ -22,7 +22,7 @@ from . import maintenance, profiling, semantic
 from .auth import FABRIC_SCOPES, STORAGE_SCOPES
 from .fabric_api import FabricClient
 from .fabric_compute import BUNDLE_DIR, RESULTS_DIR, RUNNER, bundle_files, bundle_hash, run_parameters, runner_ipynb
-from .fabric_run import TERMINAL, describe_schedule, fabric_ipynb, schedule_configuration
+from .fabric_run import TERMINAL, describe_schedule, fabric_ipynb, schedule_configuration, uses_local_module, uses_spark
 from .meta.engine import Engine, RunResult, apply_clean
 from .meta.project import ENVIRONMENTS, GateError, validate
 from .meta.store import META_LAKEHOUSE, META_SCHEMAS, LocalStore, OneLakeStore
@@ -167,8 +167,10 @@ class CloudMixin:
         """Publish the notebook, then run it on its workspace's Fabric capacity."""
         item = self._publish(name, cells, lakehouse_ref, compute, workspace)
         job_id = self.fabric.run_item_job(item["workspace_id"], item["id"], NOTEBOOK_JOB)  # type: ignore[attr-defined]
+        # As published: a Python notebook, or Spark (what the cost view counts it as).
+        engine = "python" if lakehouse_ref and uses_local_module(cells) and not uses_spark(cells) else "spark"
         return self._log_fabric_run({"kind": "Notebook run", "name": name, "workspace_id": item["workspace_id"],
-                                     "workspace_name": item["workspace_name"],
+                                     "workspace_name": item["workspace_name"], "engine": engine,
                                      "item_id": item["id"], "job_id": job_id, "url": item["url"]})
 
     def _notebook_item(self, name: str, workspace_id: str) -> dict[str, Any] | None:
@@ -220,12 +222,12 @@ class CloudMixin:
 
     def _managed_tables(self, project: Any, include_meta: bool = True) -> list[dict[str, str]]:
         rows = [{"entity": e.name, "lakehouse": project.layer(e.layer).lakehouse, "schema": e.schema,
-                 "table": e.table, "layer": e.layer}
+                 "table": e.table, "layer": e.layer, "retention_days": project.layer(e.layer).retention_days}
                 for e in sorted(project.entities.values(), key=lambda x: (project.layer_index(x.layer), x.name))
                 if e.layer in project.layer_names()]
         if include_meta:
-            rows += [{"entity": f"meta.{t}", "lakehouse": META_LAKEHOUSE, "schema": "meta", "table": t, "layer": ""}
-                     for t in META_SCHEMAS]
+            rows += [{"entity": f"meta.{t}", "lakehouse": META_LAKEHOUSE, "schema": "meta", "table": t, "layer": "",
+                      "retention_days": maintenance.RETENTION_HOURS // 24} for t in META_SCHEMAS]
         return rows
 
     def meta_health(self, env: str = "dev") -> dict[str, Any]:
@@ -250,12 +252,18 @@ class CloudMixin:
         for t in rows:
             label = f"{t['schema']}.{t['table']}"
             try:
+                days = t.get("retention_days") or maintenance.RETENTION_HOURS // 24
                 if isinstance(store, LocalStore):
-                    result = maintenance.compact_local(store.uri(t["lakehouse"], t["schema"], t["table"]))
+                    result = maintenance.compact_local(store.uri(t["lakehouse"], t["schema"], t["table"]), days)
                     out.append({"table": label, "status": "Completed", **result})
                     continue
                 lh_id = store.lakehouse_ids[t["lakehouse"]]
-                job_id = self.fabric.run_table_maintenance(store.workspace_id, lh_id, t["table"], t["schema"])  # type: ignore[attr-defined]
+                try:  # so Fabric's own engines keep the same history; the job below vacuums with it too
+                    maintenance.set_retention(store.uri(t["lakehouse"], t["schema"], t["table"]), days, store.options())
+                except Exception:  # noqa: BLE001 - the maintenance job still runs with the right retention
+                    pass
+                job_id = self.fabric.run_table_maintenance(  # type: ignore[attr-defined]
+                    store.workspace_id, lh_id, t["table"], t["schema"], vacuum_retention=maintenance.fabric_retention(days))
                 out.append(self._log_fabric_run({
                     "kind": "Table maintenance", "name": f"{t['lakehouse']} {label}", "env": env, "table": label,
                     "workspace_id": store.workspace_id, "item_id": lh_id, "job_id": job_id}))

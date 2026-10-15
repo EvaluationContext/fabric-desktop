@@ -380,7 +380,7 @@ function renderCreate() {
 }
 
 // Filters on Monitor, kept for the session; showFabric is remembered on this PC.
-const monitorPage = { env: "all", where: "any", problemsFirst: true, showFabric: true };
+const monitorPage = { env: "all", where: "any", problemsFirst: true, showFabric: true, panel: "runs" };
 try { monitorPage.showFabric = localStorage.getItem("fd.monitor.fabric") !== "hidden"; } catch { /* default: shown */ }
 
 async function renderMonitor() {
@@ -400,10 +400,14 @@ async function renderMonitor() {
     h("section", { class: "card monitor-local" },
       h("div", { class: "monitor-band" },
         h("h2", {}, "From Fabric Desktop"),
-        h("span", { class: "muted-text" }, "Everything this app ran or started, in every environment, on this PC and in Fabric"),
+        h("div", { class: "seg", role: "group", "aria-label": "Show" },
+          h("button", { class: monitorPage.panel === "runs" ? "on" : null, onclick: () => { monitorPage.panel = "runs"; render(); } }, "Runs"),
+          h("button", { class: monitorPage.panel === "cost" ? "on" : null, onclick: () => { monitorPage.panel = "cost"; render(); } }, "Cost")),
+        h("span", { class: "muted-text" }, monitorPage.panel === "cost" ? "Capacity each run used in Fabric, and what running on this PC saved"
+          : "Everything this app ran or started, in every environment, on this PC and in Fabric"),
         h("span", { class: "spacer" }),
         btn("Refresh", "sync", () => render(), "tool outline")),
-      h("div", { class: "monitor-filters" },
+      monitorPage.panel === "cost" ? null : h("div", { class: "monitor-filters" },
         h("div", { class: "row", role: "group", "aria-label": "Environment" },
           chip("env", "all", "All"), Object.entries(ENV_LABEL).map(([id, label]) => chip("env", id, label))),
         h("div", { class: "row", role: "group", "aria-label": "Where it ran" },
@@ -426,6 +430,7 @@ async function renderMonitor() {
       monitorPage.showFabric ? slot : null)));
   if (monitorPage.showFabric) dockFabricView(slot, "monitor", "monitor");
   else invoke("fabric_view_hide").catch(() => {});
+  if (monitorPage.panel === "cost") { local.replaceWith(costPanel()); return; }
 
   const [writes, meta, cloud] = await Promise.all([
     attempt(() => rpc("history")),
@@ -721,9 +726,18 @@ async function pollSidecar(method, params, done, keepGoing) {
 }
 
 const catalogPage = { data: null, tables: null, layers: {}, scope: "all", type: "all", query: "",
-                      wsQuery: "", sort: "name", dir: 1, open: new Set() };
+                      wsQuery: "", sort: "name", dir: 1, open: new Set(), tab: "catalog" };
+
+// The OneLake page's tabs: the catalog here; Shortcuts and Access are in estate.js.
+function onelakeTabs() {
+  const tab = (id, label) => h("button", { class: `tab${catalogPage.tab === id ? " active" : ""}`,
+    onclick: () => { catalogPage.tab = id; render(); } }, label);
+  return h("div", { class: "subtabs onelake-tabs" }, tab("catalog", "Catalog"), tab("shortcuts", "Shortcuts"), tab("access", "Access"));
+}
 
 async function renderOneLake() {
+  if (catalogPage.tab === "shortcuts") return renderShortcuts();
+  if (catalogPage.tab === "access") return renderAccess();
   const cp = catalogPage;
   const nav = h("nav", { class: "catalog-nav" });
   const head = h("div", { class: "catalog-head" });
@@ -733,7 +747,7 @@ async function renderOneLake() {
   const search = h("input", { class: "catalog-search", placeholder: "Search by name, workspace or table", value: cp.query, "aria-label": "Search the catalog" });
   search.addEventListener("input", () => { cp.query = search.value; draw(); });
 
-  setView(h("div", { class: "page monitor onelake" }, signInCallout(),
+  setView(h("div", { class: "page monitor onelake" }, signInCallout(), onelakeTabs(),
     h("section", { class: "card onelake-catalog" },
       h("div", { class: "monitor-band" }, h("h2", {}, "OneLake catalog"),
         h("span", { class: "muted-text" }, "Every item in every workspace you can open"), h("span", { class: "spacer" }), note, search,

@@ -21,6 +21,7 @@ from .jobs import Job, run_local
 from .cloud_service import CloudMixin
 from .fabric_run import compute_check
 from .dataops_service import DataOpsMixin
+from .estate_service import EstateMixin
 from .meta_service import MetaMixin
 from .notebook import Kernel, NotebookStore
 from .onelake import FileStore, TableCatalog
@@ -32,12 +33,13 @@ def data_dir() -> Path:
     return Path(base) / "FabricDesktop"
 
 
-class Service(MetaMixin, CloudMixin, DataOpsMixin):
+class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin):
     def __init__(self, client_id: str | None = None, root: Path | None = None):
         self._client_id = client_id or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", "")
         self.root = root or data_dir()
         self._auth: Authenticator | None = None
-        self.kernel = Kernel(token=self._token_for, load_notebook=lambda name: self.notebooks.load(name)["cells"])
+        self.kernel = Kernel(token=self._token_for, load_notebook=lambda name: self.notebooks.load(name)["cells"],
+                             variable_libraries=self._notebook_variables)
         self.notebooks = NotebookStore(self.root / "notebooks")
         self._schema_cache: dict[str, bool] = {}
         self._tables: dict[str, Any] | None = None

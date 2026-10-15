@@ -7,6 +7,8 @@ The calls Fabric notebooks use most work the same here:
 - ``notebook``: run another notebook from this PC's notebooks folder, exit with a value.
 - ``credentials``: getToken for storage and Fabric, getSecret from Azure Key Vault as you.
 - ``runtime.context``: the notebook, lakehouse and workspace, with ``isLocal`` set.
+- ``variableLibrary``: VL_Sources from the metadata project, with the values of the environment
+  whose workspace the attached lakehouse is in (Dev's when it is in none).
 
 What only Fabric has (mounting other storage, session settings) raises an error that says so.
 """
@@ -14,6 +16,7 @@ What only Fabric has (mounting other storage, session settings) raises an error 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import types
 from dataclasses import dataclass
@@ -54,10 +57,12 @@ class Host:
 
     def __init__(self, token: Callable[[str], str] | None = None,
                  run_notebook: Callable[[str, int, dict[str, Any]], Any] | None = None,
-                 notebook_name: Callable[[], str] | None = None):
+                 notebook_name: Callable[[], str] | None = None,
+                 variables: Callable[[str], dict[str, str] | None] | None = None):
         self.token = token
         self.run_notebook = run_notebook
         self.notebook_name = notebook_name or (lambda: "")
+        self.variables = variables
 
 
 def _store() -> FileStore:
@@ -280,12 +285,53 @@ def _make_runtime(host: Host) -> types.SimpleNamespace:
     return types.SimpleNamespace(context=_Context())
 
 
+class VariableLibrary:
+    """A variable library's values, read as attributes: ``lib.CRM_server_host``."""
+
+    def __init__(self, name: str, values: dict[str, str]):
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_values", dict(values))
+
+    def __getattr__(self, key: str) -> str:
+        values = object.__getattribute__(self, "_values")
+        if key in values:
+            return values[key]
+        raise AttributeError(f"{object.__getattribute__(self, '_name')} has no variable {key}")
+
+    def __dir__(self) -> list[str]:
+        return sorted(object.__getattribute__(self, "_values"))
+
+    def __repr__(self) -> str:
+        return f"VariableLibrary({object.__getattribute__(self, '_name')}, {len(object.__getattribute__(self, '_values'))} variables)"
+
+
+_REFERENCE = re.compile(r"^\$\(/\*\*/([^/]+)/([^)]+)\)$")
+
+
+def _make_variable_library(host: Host) -> types.SimpleNamespace:
+    def getLibrary(variableLibraryName: str) -> VariableLibrary:  # noqa: N802, N803
+        values = host.variables(variableLibraryName) if host.variables else None
+        if values is None:
+            raise LookupError(f"On this PC the variable library {variableLibraryName} comes from the metadata project; "
+                              "only VL_Sources is there (Metadata > Source systems).")
+        return VariableLibrary(variableLibraryName, values)
+
+    def get(variableReference: str) -> str:  # noqa: N803
+        m = _REFERENCE.match(str(variableReference).strip())
+        if not m:
+            raise ValueError('Use a reference like "$(/**/VL_Sources/CRM_server_host)"')
+        return getattr(getLibrary(m.group(1)), m.group(2))
+
+    return types.SimpleNamespace(getLibrary=getLibrary, get=get)
+
+
 def build(host: Host) -> types.ModuleType:
     mod = types.ModuleType("notebookutils", __doc__)
     mod.fs = _make_fs()
     mod.credentials = _make_credentials(host)
     mod.notebook = _make_notebook(host)
     mod.runtime = _make_runtime(host)
+    mod.variableLibrary = _make_variable_library(host)
     mod.mssparkutils = mod  # ``from notebookutils import mssparkutils`` still works
-    mod.help = lambda *_a: print("notebookutils on this PC: fs, notebook, credentials, runtime")
+    mod.help = lambda *_a: print("notebookutils on this PC: fs, notebook, credentials, runtime, variableLibrary")
     return mod

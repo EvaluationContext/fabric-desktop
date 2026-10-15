@@ -19,6 +19,7 @@ SMALL_FILE_BYTES = 32 * 1024 * 1024
 SMALL_FILE_COUNT = 20     # this many files averaging under SMALL_FILE_BYTES is worth compacting
 VERSIONS_BEFORE_VACUUM = 30
 RETENTION_HOURS = 7 * 24 + 1  # Fabric's default retention is 7 days
+LOG_RETENTION_DAYS = 30  # Delta's default: older log entries go at the next checkpoint
 
 
 def _when(ms: Any) -> str | None:
@@ -68,10 +69,38 @@ def health(uri: str, options: dict[str, str] | None = None, local: bool = False)
             "status": "needs_maintenance" if advice else "healthy"}
 
 
-def compact_local(uri: str) -> dict[str, Any]:
-    """OPTIMIZE (compaction, no V-Order) and VACUUM for a table on this PC."""
+def retention_hours(days: int) -> int:
+    return int(days) * 24 + 1
+
+
+def fabric_retention(days: int) -> str:
+    """Retention as Fabric's table maintenance job takes it: d.hh:mm:ss, an hour of margin."""
+    return f"{int(days)}.01:00:00"
+
+
+def retention_properties(days: int) -> dict[str, str]:
+    """Table properties that keep ``days`` of history for every engine: VACUUM keeps removed
+    files that long, and the log keeps its entries at least that long (Delta's default is 30)."""
+    return {"delta.deletedFileRetentionDuration": f"interval {int(days)} days",
+            "delta.logRetentionDuration": f"interval {max(int(days), LOG_RETENTION_DAYS)} days"}
+
+
+def set_retention(uri: str, days: int, options: dict[str, str] | None = None) -> bool:
+    """Write the retention properties onto the table if they differ. True when it changed."""
+    table = DeltaTable(uri, storage_options=options)
+    wanted = retention_properties(days)
+    config = table.metadata().configuration or {}
+    if all(config.get(k) == v for k, v in wanted.items()):
+        return False
+    table.alter.set_table_properties(wanted, raise_if_not_exists=False)
+    return True
+
+
+def compact_local(uri: str, days: int = 7) -> dict[str, Any]:
+    """OPTIMIZE (compaction, no V-Order) and VACUUM for a table on this PC, keeping ``days`` of history."""
+    set_retention(uri, days)
     table = DeltaTable(uri)
     metrics = table.optimize.compact()
-    removed = table.vacuum(retention_hours=RETENTION_HOURS, dry_run=False, enforce_retention_duration=False)
+    removed = table.vacuum(retention_hours=retention_hours(days), dry_run=False, enforce_retention_duration=False)
     return {"files_added": metrics.get("numFilesAdded", 0), "files_removed": metrics.get("numFilesRemoved", 0),
             "vacuumed": len(removed)}

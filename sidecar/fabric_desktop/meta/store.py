@@ -1,7 +1,7 @@
 """Where an environment's tables live: Delta tables on this PC, or in OneLake.
 
 Each layer is a lakehouse named LH_<Layer>. Run metadata (run log, quality results,
-watermarks, schema history, deployments) goes to the ``meta`` schema of LH_Meta in the
+watermarks, schema history, deployments, restores) goes to the ``meta`` schema of LH_Meta in the
 same environment, so the same rows exist locally in Dev and in OneLake for Test and Prod.
 Quarantined rows go to the ``quarantine`` schema of the entity's own lakehouse.
 """
@@ -34,10 +34,12 @@ META_SCHEMAS: dict[str, dict[str, pl.DataType]] = {
                        "at": pl.String},
     "deployments": {"env": pl.String, "version": pl.String, "source_env": pl.String, "at": pl.String},
     "entities": {"version": pl.String, "name": pl.String, "config": pl.String, "at": pl.String},
+    "restores": {"entity": pl.String, "env": pl.String, "from_version": pl.Int64, "to_version": pl.Int64,
+                 "new_version": pl.Int64, "by": pl.String, "reason": pl.String, "at": pl.String},
 }
 # Delta returns rows in no particular order, so every meta table is sorted by when it was written.
 _ORDER = {"run_log": "started_at", "dq_results": None, "watermarks": "at", "schema_history": "at",
-          "deployments": "at", "entities": "at"}
+          "deployments": "at", "entities": "at", "restores": "at"}
 
 
 def _read(uri: str, options: dict[str, str] | None, version: int | None = None) -> pl.DataFrame | None:

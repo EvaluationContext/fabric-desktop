@@ -4,7 +4,7 @@
 
 state.meta = {
   project: null,       // summary from meta_project
-  tab: "entities",     // entities | layers | keys | sources | runs | health | model | environments
+  tab: "entities",     // entities | layers | keys | sources | runs | health | model | tests | environments
   env: (() => { try { return localStorage.getItem("fd.env") || "dev"; } catch { return "dev"; } })(),  // set from the top bar
   entity: null,        // open entity detail
   layersDraft: null,   // unsaved layer edits
@@ -82,7 +82,7 @@ async function renderMetadata() {
   if (!p.path) return renderMetaSetup(p);
   const m = state.meta;
   const tabs = [["entities", "Entities"], ["layers", "Layers"], ["keys", "Surrogate keys"], ["sources", "Source systems"],
-    ["runs", "Runs"], ["health", "Table health"], ["model", "Semantic model"], ["environments", "Environments and promote"]];
+    ["runs", "Runs"], ["health", "Table health"], ["model", "Semantic model"], ["tests", "Tests"], ["environments", "Environments and promote"]];
   const body = h("div", { class: "meta-body" });
   setView(h("div", { class: "page" },
     h("div", { class: "page-head" },
@@ -101,7 +101,7 @@ async function renderMetadata() {
       h("button", { class: `tab${m.tab === id ? " active" : ""}`, onclick: () => goMeta(id) }, label))),
     body));
   const render = { entities: renderEntitiesTab, layers: renderLayersTab, keys: renderKeysTab, sources: renderSourcesTab,
-    runs: renderRunsTab, health: renderHealthTab, model: renderModelTab, environments: renderEnvTab }[m.tab];
+    runs: renderRunsTab, health: renderHealthTab, model: renderModelTab, tests: renderTestsTab, environments: renderEnvTab }[m.tab];
   await render(body, p);
 }
 
@@ -298,6 +298,7 @@ async function renderEntity() {
         }, "tool outline"),
         btn("Profile", "dataBarVertical", () => profileEntity(e.name), "tool outline"),
         btn("Compare", "flow", () => compareDialog(e.name), "tool outline"),
+        btn("History", "history", () => historyDialog(e.name), "tool outline", { title: "Every version of the table; restore an earlier one" }),
         btn("Rebuild with downstream", "sync", () => runEntities([e.name], { cascade: true }), "tool outline"),
         btn(inFabric(state.meta.project, state.meta.env) ? `Run in Fabric (${ENV_LABEL[state.meta.env]})` : `Run in ${ENV_LABEL[state.meta.env]}`, "play",
           () => (dirty() ? save() : Promise.resolve()).then(() => runEntities([e.name])), "tool primary"))),
@@ -317,7 +318,8 @@ async function renderEntity() {
           h("div", { class: "lineage3" },
             h("div", {}, h("span", { class: "muted-text small" }, "Reads"),
               e.reads.length ? e.reads.map((r) => h("button", { class: "node", onclick: () => openEntity(r) }, entityName(r)))
-                : h("span", { class: "node plain" }, e.source || "no source")),
+                : h("span", { class: "node plain" }, e.source || "no source"),
+              shortcutLineage(e)),
             h("div", {}, h("span", { class: "muted-text small" }, "This table"), h("span", { class: "node self" }, entityName(e.name))),
             h("div", {}, h("span", { class: "muted-text small" }, "Feeds"),
               e.impact.length ? e.impact.map((r) => h("button", { class: "node", onclick: () => openEntity(r) }, entityName(r)))
@@ -488,7 +490,7 @@ function renderLayersTab(body, p) {
     h("div", { class: "flow" }, L.map((l, i) => [i ? h("span", { class: "arrow" }, "→") : null,
       h("span", { class: "layer-chip big", style: `background:${LAYER_COLORS[i % LAYER_COLORS.length]}` }, l.name)])),
     h("table", { class: "list" },
-      h("thead", {}, h("tr", {}, ["#", "Layer", "Lakehouse in each environment", "Can read from", "Schema drift", "Required checks", "Surrogate keys", "Entities", ""].map((c) => h("th", {}, c)))),
+      h("thead", {}, h("tr", {}, ["#", "Layer", "Lakehouse in each environment", "Can read from", "Schema drift", "Required checks", "Surrogate keys", "Keep history", "Entities", ""].map((c) => h("th", {}, c)))),
       h("tbody", {}, L.map((l, i) => h("tr", {},
         h("td", {}, i + 1),
         h("td", {}, h("b", {}, l.name), l.description ? h("div", { class: "muted-text" }, l.description) : null),
@@ -506,6 +508,9 @@ function renderLayersTab(body, p) {
         h("td", {}, h("label", { class: "check inline" },
           h("input", { type: "checkbox", checked: l.require_keys ? true : null, onchange: (ev) => { l.require_keys = ev.target.checked; rerender(); } }),
           "Required")),
+        h("td", {}, h("label", { class: "row tight", title: "How long earlier versions can be restored. VACUUM keeps their files this long; Fabric needs at least 7 days." },
+          h("input", { type: "number", min: "7", max: "3650", step: "1", class: "days", value: l.retention_days ?? 7, "aria-label": "Days of history",
+            onchange: (ev) => { l.retention_days = Number(ev.target.value); rerender(); } }), "days")),
         h("td", {}, counts[l.name] || h("span", { class: "muted-text" }, "none")),
         h("td", {}, h("span", { class: "row tight" },
           h("button", { class: "tool small", title: "Move up", onclick: () => move(i, -1) }, icon("up", 14)),
@@ -517,7 +522,7 @@ function renderLayersTab(body, p) {
         if (L.length >= 10) return toast("A project can have at most 10 layers", true);
         const name = await askText("Add a layer", "Name (lowercase, like platinum)", "", "Add");
         if (!name) return;
-        L.push({ name: name.toLowerCase(), drift: "strict", required_checks: ["key_unique"], reads_from: [], description: "" });
+        L.push({ name: name.toLowerCase(), drift: "strict", required_checks: ["key_unique"], reads_from: [], description: "", retention_days: 7 });
         rerender();
       }, "tool outline"),
       h("span", { class: "spacer" }),
@@ -530,12 +535,13 @@ function renderLayersTab(body, p) {
       infoCard("No mixing", "A table writes only to its own layer's lakehouse. It reads from earlier layers, or from its own layer when that makes no loop, like a fact reading its dimensions. Reading a later layer is always rejected."),
       infoCard("Lakehouses are created for you", "Each layer is a schema-enabled lakehouse named LH_<Layer> in every environment. Dev keeps them on this PC; Test and Prod get them on the first promote."),
       infoCard("Each layer has its own policy", "Schema drift and required checks are set per layer, so a lenient Bronze and a strict Gold can sit in one flow. Reordering is refused if a table would end up reading a later layer."),
-      infoCard("Surrogate keys can be required", "Tick Required on a layer, like silver, and every table in it must take its keys from LH_Keys with a [[keys]] block.")));
+      infoCard("Surrogate keys can be required", "Tick Required on a layer, like silver, and every table in it must take its keys from LH_Keys with a [[keys]] block."),
+      infoCard("Undo a bad load", "Every run is a new Delta version. Keep history sets how many days back a table can be restored from its History; Optimize keeps that much when it vacuums.")));
 }
 
 function stripLayer(l) {
   return { name: l.name, drift: l.drift, required_checks: [...l.required_checks].sort(), reads_from: l.reads_from || [],
-    description: l.description || "", require_keys: !!l.require_keys };
+    description: l.description || "", require_keys: !!l.require_keys, retention_days: Number(l.retention_days ?? 7) };
 }
 
 function infoCard(title, text) {
@@ -579,7 +585,7 @@ async function renderEnvTab(body, p) {
       if (!res) return;
       checks[target] = res;
       box.replaceWith(res.errors.length ? h("div", { class: "problems" }, h("b", {}, `${res.errors.length} thing${res.errors.length === 1 ? "" : "s"} to do first`), gateList(res.errors))
-        : h("div", { class: "pass-box" }, icon("ok", 16), `Ready: metadata ${res.version} passed every check in ${ENV_LABEL[source]}.`));
+        : h("div", { class: "pass-box" }, icon("ok", 16), `Ready: metadata ${res.version} passed every check in ${ENV_LABEL[source]}${res.tests?.passed ? `, and all ${res.tests.passed} test${res.tests.passed === 1 ? "" : "s"} passed` : ""}.`));
     });
     return h("div", { class: "card pad" },
       h("div", { class: "row" }, h("b", {}, `Promote ${ENV_LABEL[source]} to ${ENV_LABEL[target]}`), h("span", { class: "spacer" }),
@@ -589,7 +595,7 @@ async function renderEnvTab(body, p) {
           const res = await metaCall("meta_promote", { source, target }, "Promote blocked");
           if (res) { toast(`${ENV_LABEL[target]} is now on metadata ${res.version}`, false, { log: true }); render(); }
         }, "tool primary small")),
-      h("p", { class: "muted-text" }, "Needs the project to pass the save gate, and every table's last run here to be green on this exact metadata version. Lakehouses that don't exist yet are created."),
+      h("p", { class: "muted-text" }, "Needs the project to pass the save gate, its tests to pass, and every table's last run here to be green on this exact metadata version. Lakehouses that don't exist yet are created."),
       box, promoteImpact(source, target));
   };
   body.replaceChildren(h("div", { class: "env-cards" }, ["dev", "test", "prod"].map(card)),
@@ -911,7 +917,7 @@ async function renderSourcesTab(body) {
 
   body.replaceChildren(...[
     k.errors.length ? h("div", { class: "problems" }, h("b", {}, "Fix these first"), gateList(k.errors)) : null,
-    h("div", { class: "sources-grid" }, list, form)].filter(Boolean));
+    h("div", { class: "sources-grid" }, list, form), varlibCard()].filter(Boolean));
 }
 
 window.META_VIEWS = { metadata: renderMetadata, entity: renderEntity };

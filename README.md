@@ -25,7 +25,8 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 
 1. In the Entra admin center, go to **App registrations > New registration**. Add a **Public client** redirect URI of `http://localhost`.
 2. Under **API permissions**, add these delegated permissions:
-   - Power BI Service (Fabric): `Workspace.ReadWrite.All` and `Item.ReadWrite.All`.
+   - Power BI Service (Fabric): `Workspace.ReadWrite.All` and `Item.ReadWrite.All`; also `OneLake.ReadWrite.All` (shortcuts and data access roles) and `Connection.Read.All` (cloud connections for shortcuts).
+   - Microsoft Graph: `User.ReadBasic.All` (find people when granting access).
    - Azure Storage: `user_impersonation`.
 3. Copy the Application (client) ID and set it for your user:
    `setx FABRIC_DESKTOP_CLIENT_ID <client-id>`
