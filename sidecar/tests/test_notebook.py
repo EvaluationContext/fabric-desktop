@@ -50,7 +50,20 @@ def test_ipynb_round_trip_keeps_cells_and_lakehouse():
     cells = [{"type": "markdown", "source": "# Sales\nby region"}, {"type": "code", "source": "x = 1\nx"}]
     nb = json.loads(json.dumps(to_ipynb(cells, LH)))
     assert nb["metadata"]["dependencies"]["lakehouse"]["default_lakehouse"] == "lh1"
-    assert from_ipynb(nb) == {"cells": cells, "lakehouse": LH}
+    assert from_ipynb(nb) == {"cells": cells, "lakehouse": LH, "compute": "default"}
+
+
+def test_notebook_keeps_where_it_runs_until_changed(tmp_path):
+    store = NotebookStore(tmp_path)
+    cells = [{"type": "code", "source": "1"}]
+    store.save("Sales", cells, LH, "fabric")
+    assert store.load("Sales")["compute"] == "fabric"
+    store.save("Sales", cells, LH)  # autosave and publish don't say: the choice stays
+    assert store.load("Sales")["compute"] == "fabric"
+    store.save("Sales", cells, LH, "default")
+    assert "compute" not in json.loads(store.path("Sales").read_text())["metadata"]["fabric_desktop"]
+    with pytest.raises(ValueError):
+        store.save("Sales", cells, LH, "cloud")
 
 
 def test_notebook_store_names_and_renames(tmp_path):
@@ -253,3 +266,36 @@ def test_sql_result_saves_as_a_table_and_exports_csv(tmp_path, monkeypatch):
     csv = service.export_sql_csv("SELECT * FROM regions ORDER BY Country", LH)
     assert csv["rows"] == 2 and Path(csv["path"]).read_text().splitlines()[1] == '"UK","Europe"'
     assert service.table_columns(LH, "regions") == [{"name": "Country", "type": "string"}, {"name": "Region", "type": "string"}]
+
+
+def test_spark_notebooks_are_flagged_as_fabric_only():
+    from fabric_desktop.fabric_run import compute_check
+    cells = [{"type": "markdown", "source": "spark.read is explained here"},
+             {"type": "code", "source": "import polars as pl\nfrom fabric_desktop import lakehouse"},
+             {"type": "code", "source": "df = spark.read.table('dbo.orders')"},
+             {"type": "code", "source": "%%sql\nMERGE INTO sk.customer t USING s ON t.id = s.id"},
+             {"type": "code", "source": "%%sql\nselect * from dbo.orders"},
+             {"type": "code", "source": "%%pyspark\nx = 1"}]
+    check = compute_check(cells, LH)
+    assert not check["local"]["ok"]
+    assert [r["cell"] for r in check["local"]["reasons"]] == [3, 4, 6]
+    assert check["local"]["reasons"][0]["code"] == "df = spark.read.table('dbo.orders')"
+    assert check["fabric"] == {"ok": True, "reasons": []}
+
+
+def test_local_paths_and_no_lakehouse_keep_a_notebook_off_fabric():
+    from fabric_desktop.fabric_run import compute_check
+    cells = [{"type": "code", "source": "import polars as pl\ndf = pl.read_csv(r'C:\\data\\orders.csv')"}]
+    check = compute_check(cells, None)
+    assert check["local"]["ok"]
+    assert [r["cell"] for r in check["fabric"]["reasons"]] == [None, 1]
+    assert check["fabric"]["reasons"][1]["code"].startswith("df = pl.read_csv(")
+    assert compute_check(cells[:0], LH)["fabric"]["ok"]
+
+
+def test_open_and_save_say_where_the_notebook_can_run(tmp_path):
+    svc = Service(client_id="x", root=tmp_path)
+    saved = svc.save_notebook("Spark", [{"type": "code", "source": "spark.sql('select 1')"}], LH, "local")
+    assert saved["check"]["local"]["ok"] is False
+    opened = svc.open_notebook("Spark")
+    assert opened["compute"] == "local" and opened["check"]["fabric"]["ok"]

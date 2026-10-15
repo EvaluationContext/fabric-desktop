@@ -1277,7 +1277,8 @@ function cellFrom(c) {
 }
 
 function loadIntoState(nb) {
-  state.notebook = { name: nb.name, cells: nb.cells.map(cellFrom), lakehouse: nb.lakehouse || null, dirty: false };
+  state.notebook = { name: nb.name, cells: nb.cells.map(cellFrom), lakehouse: nb.lakehouse || null, dirty: false,
+    compute: nb.compute || "default", check: nb.check || null };
   if (!state.notebook.cells.length) state.notebook.cells.push(cellFrom({ type: "code" }));
   state.notebook.cells.forEach((c) => { if (c.type === "markdown" && c.source) c.editing = false; });
   state.selected = state.notebook.cells[0].id;
@@ -1310,7 +1311,7 @@ async function newNotebook(lakehouse) {
 
 function notebookPayload() {
   return { name: state.notebook.name, cells: state.notebook.cells.map((c) => ({ type: c.type, source: c.source })),
-    lakehouse_ref: state.notebook.lakehouse };
+    lakehouse_ref: state.notebook.lakehouse, compute: state.notebook.compute };
 }
 
 async function saveNotebook() {
@@ -1319,6 +1320,7 @@ async function saveNotebook() {
   const ok = await attempt(() => rpc("save_notebook", notebookPayload()), "Could not save");
   if (ok && state.notebook) {
     state.notebook.dirty = false;
+    if (ok.check) setComputeCheck(ok.check);
     renderChrome();
   }
 }
@@ -1355,6 +1357,89 @@ async function publishNotebook() {
     renderChrome();
     toast(`Published ${nb.name} to ${nb.lakehouse.workspace_name} as a Fabric notebook item.`);
   }
+}
+
+// ---------- Where a notebook runs: this PC or Fabric ----------
+
+// Each notebook has a "Runs on" choice: This PC, Fabric, or the default, which follows where the
+// environment picked in the top bar runs (Metadata > Environments). Run all goes there. Fabric
+// runs the whole published notebook, so single cells only run on this PC.
+function nbWhere(nb) {
+  const choice = nb?.compute || "default";
+  const ws = nb?.lakehouse?.workspace_name;
+  const envFabric = envWhere(state.meta?.project, state.meta?.env).fabric;
+  const fabric = choice === "fabric" || (choice === "default" && envFabric);
+  const short = fabric ? (ws ? `Fabric · ${ws}` : "Fabric") : "This PC";
+  return { fabric, choice, envFabric, short };
+}
+
+function computeMenu(nb) {
+  const where = nbWhere(nb);
+  const env = ENV_LABEL[state.meta?.env] || "Dev";
+  const option = (value, label, iconName) => ({ label, icon: where.choice === value ? "ok" : iconName,
+    action: () => setNotebookCompute(value) });
+  return [
+    { info: "Where Run all runs this notebook." },
+    option("local", "This PC (no Fabric capacity used)", "desktop"),
+    option("fabric", `Fabric${nb.lakehouse ? ` (${nb.lakehouse.workspace_name})` : " (attach a lakehouse first)"}`, "cloud"),
+    option("default", `Same as ${env} (${where.envFabric ? "Fabric" : "this PC"})`, "sync"),
+    { info: `Python ${state.python || "3"} on this PC. Fabric runs publish the notebook first.` },
+    { label: "Restart kernel", icon: "restart", action: restartKernel },
+  ];
+}
+
+async function setNotebookCompute(value) {
+  const nb = state.notebook;
+  const before = nbWhere(nb).fabric;
+  nb.compute = value;
+  await saveNotebook();
+  if (state.notebook !== nb) return;
+  const now = nbWhere(nb);
+  if (now.fabric !== before) toast(now.fabric ? `${nb.name} now runs in Fabric. Run all publishes it and starts it there.`
+    : `${nb.name} now runs on this PC.`);
+  renderNotebook();
+}
+
+// After a save: whether the notebook can still run where it is set to. Only the note is redrawn,
+// so typing in a cell isn't interrupted.
+function setComputeCheck(check) {
+  const nb = state.notebook;
+  const changed = JSON.stringify(nb.check) !== JSON.stringify(check);
+  nb.check = check;
+  if (!changed || state.view !== "notebook") return;
+  const old = document.querySelector(".compute-note-slot");
+  if (old) old.replaceWith(computeNote(nb));
+}
+
+function computeReasons(reasons) {
+  return h("ul", { class: "gate-list" }, reasons.map((r) => h("li", {},
+    r.cell ? [`Cell ${r.cell} ${r.text}`, r.code ? [": ", h("code", {}, r.code)] : null] : `The notebook ${r.text}`)));
+}
+
+// A note at the top of the notebook when it can't run where it is set to, or how a Fabric run works.
+function computeNote(nb) {
+  const slot = h("div", { class: "compute-note-slot" });
+  const where = nbWhere(nb);
+  const check = nb.check;
+  const here = check?.[where.fabric ? "fabric" : "local"];
+  const other = check?.[where.fabric ? "local" : "fabric"];
+  if (here && !here.ok) {
+    const switchTo = where.fabric ? "local" : "fabric";
+    slot.append(h("div", { class: "problems" },
+      h("div", { class: "row" }, icon("warning", 16),
+        h("b", { class: "grow" }, where.fabric ? "This notebook can't run in Fabric yet" : "This notebook only runs in Fabric"),
+        other?.ok ? btn(where.fabric ? "Run on this PC" : "Run in Fabric", where.fabric ? "desktop" : "cloud",
+          () => setNotebookCompute(switchTo), "tool small") : null),
+      computeReasons(here.reasons)));
+  } else if (where.fabric) {
+    const run = nb.fabricRun;
+    slot.append(h("div", { class: "callout compute-callout" }, icon("cloud", 18),
+      h("span", { class: "grow" }, `Run all publishes this notebook and runs it on ${nb.lakehouse?.workspace_name || "the workspace"}'s Fabric capacity. `,
+        "Cell output shows in Fabric, and the bell tells you when it finishes."),
+      run ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); openInFabric(run.url); } },
+        `Last run: ${run.status === "NotStarted" ? "starting" : run.status}`) : null));
+  }
+  return slot;
 }
 
 // ---------- Run in Fabric and schedules ----------
@@ -1633,30 +1718,33 @@ function renderNotebook() {
   const runAllBtn = btn("Run all", "play", runAll, "tool", { disabled: busy, "data-run": true });
   runAllBtn.querySelector("svg").classList.add("play");
   const stopBtn = btn("Stop", "stop", stopKernel, "tool", { disabled: !busy, "data-stop": true });
-  const envBtn = h("button", { class: "tool outline", onclick: (e) => showMenu(e.currentTarget, [
-    { info: `Python ${state.python || ""} on this PC. No Fabric capacity is used.` },
-    { label: "Restart kernel", icon: "restart", action: restartKernel },
-  ]) }, icon("desktop", 16), `Python ${state.python || "3"} · this PC`, icon("chevronDown", 14));
+  const where = nbWhere(nb);
+  const fabricMode = where.fabric;
+  const localOnlyAttrs = (attrs = {}) => fabricMode
+    ? { ...attrs, disabled: true, "data-local-only": true, title: "Fabric runs the whole notebook. Use Run all, or switch Runs on to This PC to run single cells." }
+    : attrs;
+  const computeBtn = h("button", { class: `tool outline compute-btn${fabricMode ? " fabric" : ""}`,
+    title: "Where Run all runs this notebook", onclick: (e) => showMenu(e.currentTarget, computeMenu(nb)) },
+    icon(fabricMode ? "cloud" : "desktop", 16), `Runs on: ${where.short}`, icon("chevronDown", 14));
 
   const toolbars = {
-    home: [runAllBtn, stopBtn, h("div", { class: "sep" }), btn("Add data items", "lakehouse", openDataItems), envBtn,
+    home: [runAllBtn, stopBtn, computeBtn, h("div", { class: "sep" }), btn("Add data items", "lakehouse", openDataItems),
       h("div", { class: "spacer" }), btn("Save", "save", saveNotebook),
       btn("Schedule", "history", scheduleNotebook, "tool"),
-      btn("Run in Fabric", "cloud", runInFabric, "tool"),
       btn("Publish to OneLake", "publish", publishNotebook, "tool primary")],
     edit: [btn("Code", "add", () => addCell("code")), btn("Markdown", "add", () => addCell("markdown")),
       h("div", { class: "sep" }), btn("Move up", "up", () => moveCell(-1)), btn("Move down", "down", () => moveCell(1)),
       btn("Delete cell", "delete", () => deleteCell(selectedCell())), h("div", { class: "sep" }),
       btn("Clear all outputs", "clear", clearOutputs)],
-    run: [runAllBtn, btn("Run cell", "play", () => runCell(selectedCell()), "tool", { disabled: busy, "data-run": true }),
-      btn("Run all above", "up", runAbove, "tool", { disabled: busy, "data-run": true }), stopBtn, h("div", { class: "sep" }),
-      btn("Restart kernel", "restart", restartKernel), btn("Restart and run all", "restart", async () => { await restartKernel(); runAll(); }, "tool", { disabled: busy, "data-run": true }),
-      h("div", { class: "sep" }), btn("Run in Fabric", "cloud", runInFabric), btn("Schedule", "history", scheduleNotebook)],
+    run: [runAllBtn, btn("Run cell", "play", () => runCell(selectedCell()), "tool", localOnlyAttrs({ disabled: busy, "data-run": true })),
+      btn("Run all above", "up", runAbove, "tool", localOnlyAttrs({ disabled: busy, "data-run": true })), stopBtn, computeBtn, h("div", { class: "sep" }),
+      btn("Restart kernel", "restart", restartKernel), btn("Restart and run all", "restart", async () => { await restartKernel(); runAll(); }, "tool", localOnlyAttrs({ disabled: busy, "data-run": true })),
+      h("div", { class: "sep" }), btn("Schedule", "history", scheduleNotebook)],
     view: [btn(state.showExplorer ? "Hide Explorer" : "Show Explorer", "panel", () => { state.showExplorer = !state.showExplorer; renderNotebook(); })],
   };
 
   const cells = h("section", { class: "cells", "aria-label": "Notebook cells" },
-    h("div", { class: "cells-inner" }, nb.cells.map(renderCell),
+    h("div", { class: "cells-inner" }, computeNote(nb), nb.cells.map(renderCell),
       h("div", { class: "add-cell" }, btn("Code", "add", () => addCell("code", true), "tool outline"),
         btn("Markdown", "add", () => addCell("markdown", true), "tool outline"))));
 
@@ -1668,7 +1756,8 @@ function renderNotebook() {
     h("footer", { class: "statusbar" },
       h("span", {}, h("span", { class: `dot ${state.kernel}` }), kernelLabel()),
       h("span", {}, `Attached: ${lh ? lh.name : "none"}`),
-      h("span", {}, "Compute: this PC, no Fabric capacity used"),
+      h("span", {}, fabricMode ? `Compute: Fabric capacity in ${nb.lakehouse?.workspace_name || "the attached lakehouse's workspace"}`
+        : `Compute: Python ${state.python || "3"} on this PC, no Fabric capacity used`),
       nb.fabricRun ? h("span", {}, `Last Fabric run: ${nb.fabricRun.status === "NotStarted" ? "starting" : nb.fabricRun.status}`) : null));
   document.querySelector(".cells").scrollTop = scrollTop;
   document.querySelectorAll(".editor textarea, .md-edit textarea").forEach(autoGrow);
@@ -1909,6 +1998,10 @@ function clearOutputs() {
 
 async function runCell(cell) {
   if (cell.type !== "code") return true;
+  if (nbWhere(state.notebook).fabric) {
+    toast("This notebook runs in Fabric, which runs the whole notebook. Use Run all, or switch Runs on to This PC to run one cell.");
+    return false;
+  }
   if (state.kernel === "busy" && cell.status !== "queued") return false;
   stopRequested = false;
   setKernel("busy");
@@ -1956,7 +2049,7 @@ async function runCells(cells) {
   setKernel(stopRequested ? "stopped" : "idle");
 }
 
-function runAll() { return runCells(state.notebook.cells); }
+function runAll() { return nbWhere(state.notebook).fabric ? runInFabric() : runCells(state.notebook.cells); }
 
 function runAbove() {
   const cells = state.notebook.cells;
@@ -1969,7 +2062,7 @@ function setKernel(status) {
   if (state.view !== "notebook") return;
   const bar = document.querySelector(".statusbar span");
   if (bar) bar.replaceChildren(h("span", { class: `dot ${status}` }), kernelLabel());
-  document.querySelectorAll("[data-run]").forEach((b) => { b.disabled = status === "busy"; });
+  document.querySelectorAll("[data-run]").forEach((b) => { b.disabled = status === "busy" || b.hasAttribute("data-local-only"); });
   document.querySelectorAll("[data-stop]").forEach((b) => { b.disabled = status !== "busy"; });
 }
 

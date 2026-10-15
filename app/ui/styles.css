@@ -583,3 +583,8 @@ h2.flush { margin: 0; }
 .drift-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--border-soft); }
 .drift-row select { max-width: 160px; flex: none; }
 .drift-row .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Notebook "Runs on" choice and its note above the cells */
+.compute-btn.fabric { border-color: #f3c58a; background: #fff4e5; color: #a35400; }
+.compute-note-slot:empty { display: none; }
+.compute-note-slot .problems, .compute-note-slot .callout { margin: 0; }
+.compute-callout { font-size: 13px; }
