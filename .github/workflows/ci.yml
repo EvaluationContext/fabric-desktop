@@ -7,7 +7,12 @@ on:
 
 jobs:
   sidecar:
-    runs-on: windows-latest
+    # The desktop app is Windows only; the engine and the headless agent also run on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: sidecar
@@ -23,7 +28,15 @@ jobs:
         shell: bash
         run: |
           python -m pip install --no-deps --target "$RUNNER_TEMP/installed" .
-          cd "$RUNNER_TEMP" && PYTHONPATH=installed python -c "import fabric_desktop.server"
+          cd "$RUNNER_TEMP" && PYTHONPATH=installed python -c "import fabric_desktop.server, fabric_desktop.agent"
+
+  agent-image:
+    # The headless agent's Linux container (deploy/linux/Dockerfile): it must build and start.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/linux/Dockerfile -t fabric-desktop-agent .
+      - run: docker run --rm fabric-desktop-agent --help
 
   engine:
     # Release builds run this engine instead of the PC's Python: python.org's embeddable

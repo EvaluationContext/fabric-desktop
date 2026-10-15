@@ -1,0 +1,50 @@
+# Fabric Desktop agent settings. Copy to:
+#   Linux:   /etc/fabric-desktop/agent.toml
+#   Windows: C:\ProgramData\FabricDesktop\agent.toml
+# or point FABRIC_DESKTOP_AGENT_CONFIG (or --config) at it. See docs/agent.md.
+# Secrets never go here: a certificate is a path, a secret or webhook is an environment variable's name.
+
+[agent]
+name = "etl-01"                          # shown in logs and on every run_log row; the host name if left out
+project = "/srv/fabric/sales-metadata"   # the metadata project folder: a Git checkout of what you promote
+environments = ["test", "prod"]          # the only environments this agent will run
+concurrency = 1                          # jobs at once
+# workspaces = ["<test workspace id>", "<prod workspace id>"]  # optional: refuse to write anywhere else
+# home = "/var/lib/fabric-desktop"       # queue, logs and caches (default per OS, or FABRIC_DESKTOP_HOME)
+# poll_seconds = 5
+# job_lease_seconds = 300                # a job whose worker stops renewing for this long runs again
+# table_lease_seconds = 120              # how long a table write lease lasts between renewals, and how long to wait for one
+# log_level = "INFO"
+
+[auth]
+type = "service_principal"               # or "managed_identity" (Azure VM / Arc), or "user" (a cached desktop sign-in)
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "00000000-0000-0000-0000-000000000000"
+certificate_path = "/etc/fabric-desktop/agent.pem"   # PEM with key and certificate, or a .pfx
+# certificate_password_env = "FABRIC_DESKTOP_CERT_PASSWORD"
+# client_secret_env = "FABRIC_DESKTOP_CLIENT_SECRET" # only if you can't use a certificate
+
+[retry]
+max_attempts = 3                         # tries for errors worth retrying (network, throttling, a busy table)
+backoff_seconds = 60                     # then 120, 240 ... up to max_backoff_seconds
+max_backoff_seconds = 1800
+
+[alerts]
+# teams_webhook_env = "FABRIC_DESKTOP_TEAMS_WEBHOOK"  # post failed and given-up jobs to Teams
+
+[[schedule]]
+id = "prod-nightly"
+env = "prod"
+daily = ["02:00"]                        # this machine's local time
+
+[[schedule]]
+id = "test-every-30"
+env = "test"
+every_minutes = 30
+# entities = ["silver.orders", "gold.fact_sales"]   # default: every entity, in dependency order
+
+# [[schedule]]
+# id = "prod-weekend-rebuild"
+# env = "prod"
+# weekly = { days = ["Saturday"], times = ["04:00"] }
+# backfill = "full"

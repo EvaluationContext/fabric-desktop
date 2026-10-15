@@ -26,7 +26,9 @@ META_SCHEMAS: dict[str, dict[str, pl.DataType]] = {
                 "status": pl.String, "metadata": pl.String, "logic": pl.String, "load_date": pl.String,
                 "started_at": pl.String, "seconds": pl.Float64, "rows_read": pl.Int64, "rows_written": pl.Int64,
                 "quarantined": pl.Int64, "delta_version": pl.Int64, "backfill": pl.String, "message": pl.String,
-                "steps": pl.String},
+                "steps": pl.String,
+                # Set by the headless agent: which worker and host ran it, which try, which queued job.
+                "worker": pl.String, "host": pl.String, "attempt": pl.Int64, "job_id": pl.String},
     "dq_results": {"run_id": pl.String, "entity": pl.String, "check": pl.String, "failed": pl.Int64,
                    "action": pl.String},
     "watermarks": {"entity": pl.String, "value": pl.String, "run_id": pl.String, "at": pl.String},

@@ -1,0 +1,29 @@
+# systemd unit for the Fabric Desktop agent. Install: see docs/agent.md, "Linux".
+[Unit]
+Description=Fabric Desktop agent (runs metadata environments and writes to OneLake)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=fabric-desktop
+Group=fabric-desktop
+Environment=FABRIC_DESKTOP_AGENT_CONFIG=/etc/fabric-desktop/agent.toml
+Environment=FABRIC_DESKTOP_HOME=/var/lib/fabric-desktop
+# Secrets named in agent.toml (*_env), one per line: FABRIC_DESKTOP_TEAMS_WEBHOOK=https://...
+EnvironmentFile=-/etc/fabric-desktop/agent.env
+ExecStart=/opt/fabric-desktop/venv/bin/fabric-desktop agent run
+# SIGTERM stops taking jobs and waits for running ones; give long table writes time to finish.
+KillSignal=SIGTERM
+TimeoutStopSec=900
+Restart=on-failure
+RestartSec=30
+StateDirectory=fabric-desktop
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/fabric-desktop
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

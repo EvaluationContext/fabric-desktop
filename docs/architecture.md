@@ -84,3 +84,7 @@ Fabric registers a new table written from outside on its own schedule. Until the
 ## Updates
 
 Every push to `main` runs CI on Windows: sidecar tests, a check of a regular package install, and the exe build. When it is green, the `latest` GitHub release is replaced. At the next launch the app sees a newer commit in that release, updates itself, and installs the matching sidecar.
+
+## Headless agent
+
+The same engine also runs without the app, as `fabric-desktop agent run` on a Windows or Linux server. The agent adds a durable SQLite job queue, schedules, retries, per-table write leases in each environment's `LH_Meta`, and an app identity (service principal or managed identity) in place of your sign-in. See [agent.md](agent.md) and, for where it is headed, [enterprise-roadmap.md](enterprise-roadmap.md).
