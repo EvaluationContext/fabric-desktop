@@ -40,9 +40,9 @@ _ORDER = {"run_log": "started_at", "dq_results": None, "watermarks": "at", "sche
           "deployments": "at", "entities": "at"}
 
 
-def _read(uri: str, options: dict[str, str] | None) -> pl.DataFrame | None:
+def _read(uri: str, options: dict[str, str] | None, version: int | None = None) -> pl.DataFrame | None:
     try:
-        table = DeltaTable(uri, storage_options=options)
+        table = DeltaTable(uri, storage_options=options, version=version)
     except TableNotFoundError:
         return None
     return pl.from_arrow(table.to_pyarrow_table())
@@ -62,8 +62,9 @@ class Store:
 
     # ---- tables
 
-    def read(self, lakehouse: str, schema: str, table: str) -> pl.DataFrame | None:
-        return _read(self.uri(lakehouse, schema, table), self.options())
+    def read(self, lakehouse: str, schema: str, table: str, version: int | None = None) -> pl.DataFrame | None:
+        """The table now, or as it was at a Delta ``version`` (time travel)."""
+        return _read(self.uri(lakehouse, schema, table), self.options(), version)
 
     def write(self, lakehouse: str, schema: str, table: str, df: pl.DataFrame, mode: str = "overwrite",
               metadata: dict[str, str] | None = None) -> int:

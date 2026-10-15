@@ -28,6 +28,7 @@ from typing import Any
 
 import polars as pl
 
+from . import freshness as freshness_mod
 from . import keys as keys_mod
 
 MAX_LAYERS = 10
@@ -181,7 +182,7 @@ class Entity:
             "clean": len(s.get("clean", [])), "derive": len(s.get("derive", [])), "checks": len(s.get("check", [])),
             "custom": [kind for kind, _, _ in self.python_refs()],
             "keys": self.keys, "columns": self.columns, "surrogate_keys": keys_mod.entity_keys(self), "derived": self.derived, "hook_adds": self.hook_adds,
-            "reads": self.reads(), "path": str(self.path),
+            "reads": self.reads(), "path": str(self.path), "freshness": freshness_mod.promise(s),
         }
 
 
@@ -428,6 +429,7 @@ def validate(project: Project, today: dt.date | None = None) -> list[str]:
         if files and (Path(files).is_absolute() or re.match(r"^[A-Za-z]:", files)):
             errors.append(f"{e.name}: source path {files} only exists on this PC; put the files in the "
                           f"lakehouse Files area and use a relative path")
+        errors += freshness_mod.problems(e.name, s, ENVIRONMENTS)
 
         # No mixing: never read a later layer; the same layer only when the layer allows it.
         me = project.layer_index(e.layer)

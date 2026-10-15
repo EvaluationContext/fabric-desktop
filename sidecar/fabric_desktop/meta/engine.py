@@ -23,6 +23,8 @@ from . import keys as keys_mod
 from .project import SYSTEM_COLUMNS, Entity, GateError, Project, impact, load_python, run_order, validate
 from .store import Store
 
+# Columns the quarantine adds to each held row: why, which run, when, and the row's own id.
+QUARANTINE_COLUMNS = ["_check", "_run_id", "_loaded_at", "_qid"]
 FAR_PAST = dt.date(1900, 1, 1)
 FAR_FUTURE = dt.date(9999, 12, 31)
 _SIMPLE_TYPES: dict[str, pl.DataType] = {
@@ -155,6 +157,8 @@ class Engine:
         self.load_date = load_date or dt.date.today()
         self.run_id = ""
         self._evolved: list[str] = []
+        self._replay_rows: pl.DataFrame | None = None
+        self._held: list[pl.DataFrame] | None = None  # during a replay, rows that fail again wait here
 
     # ---- reading managed tables
 
@@ -184,6 +188,18 @@ class Engine:
                 blocked.add(n)
             results.append(res)
         return results
+
+    def replay(self, name: str, rows: pl.DataFrame) -> tuple[RunResult, pl.DataFrame | None]:
+        """Run quarantined rows (as text, perhaps fixed by hand) through the output contract, derive,
+        the checks and the write. Returns the run and the rows that failed again, to keep in quarantine;
+        nothing is held back from a run that didn't write."""
+        self._replay_rows, self._held = rows, []
+        try:
+            res = self.run(name, backfill="replay")
+            held = pl.concat(self._held, how="diagonal_relaxed") if self._held else None
+        finally:
+            self._replay_rows, self._held = None, None
+        return res, held
 
     def backfill(self, name: str) -> list[RunResult]:
         """Rebuild an entity and everything downstream of it, in dependency order."""
@@ -218,7 +234,7 @@ class Engine:
         try:
             if backfill == "migrate":
                 self._migrate(e, res)
-            df = self._transform(e, res, backfill)
+            df = self._replayed(e, res) if backfill == "replay" else self._transform(e, res, backfill)
             df, bad = self._checks(e, df, res)
             self._write(e, df, res, backfill)
         except DecisionNeeded as ex:
@@ -417,6 +433,26 @@ class Engine:
             df = self._call(e, s["hooks"]["before_write"], df, ctx, res, "hook before_write")
         return self._contract_out(e, df, res)
 
+    def _replayed(self, e: Entity, res: RunResult) -> pl.DataFrame:
+        """Quarantined rows back to contract types, with derived columns worked out again from any fixes."""
+        t0 = time.perf_counter()
+        df = self._replay_rows.drop([c for c in QUARANTINE_COLUMNS if c in self._replay_rows.columns])
+        res.rows_read = df.height
+        self._step(res, "read", t0, df.height, f"{plural(df.height, 'quarantined row')} to replay")
+        self._evolved = []
+        df = self._contract_out(e, df, res)
+        redone = []
+        t0 = time.perf_counter()
+        for d in e.spec.get("derive", []):
+            expr = pl.sql_expr(d["expr"])
+            if all(c in df.columns for c in expr.meta.root_names()):
+                df = df.with_columns(expr.alias(d["column"]))
+                redone.append(d["column"])
+        if redone:
+            self._step(res, "derive", t0, df.height, ", ".join(redone))
+            df = self._contract_out(e, df, res)
+        return df
+
     def _contract_out(self, e: Entity, df: pl.DataFrame, res: RunResult) -> pl.DataFrame:
         """Shape and types exactly as the contract says; rows that can't be cast go to quarantine."""
         want = [c for c in e.columns if c not in e.mode_columns() or c in df.columns]
@@ -497,7 +533,11 @@ class Engine:
         if check is not None:
             rows = rows.with_columns(pl.lit(check).alias("_check"))
         rows = rows.select([pl.col(c).cast(pl.String) for c in rows.columns]).with_columns(
-            pl.lit(self.run_id).alias("_run_id"), pl.lit(self.load_date).alias("_loaded_at"))
+            pl.lit(self.run_id).alias("_run_id"), pl.lit(self.load_date).alias("_loaded_at"),
+            pl.Series("_qid", [uuid.uuid4().hex[:12] for _ in range(rows.height)], dtype=pl.String))
+        if self._held is not None:
+            self._held.append(rows)
+            return
         self.store.write(self.lakehouse(e), "quarantine", f"{e.schema}_{e.table}", rows, mode="append")
 
     # ---- write
@@ -505,7 +545,7 @@ class Engine:
     def _write(self, e: Entity, df: pl.DataFrame, res: RunResult, backfill: str | None) -> None:
         t0 = time.perf_counter()
         existing = self.read_entity(e.name)
-        if existing is not None and df.height == 0 and e.mode in ("incremental", "scd1", "scd2"):
+        if existing is not None and df.height == 0 and (e.mode in ("incremental", "scd1", "scd2") or backfill == "replay"):
             self._step(res, "write", t0, existing.height, "nothing new to write")
             return
         df = df.with_columns(pl.lit(self.run_id).alias("_run_id"), pl.lit(self.load_date).alias("_loaded_at"))
@@ -516,6 +556,11 @@ class Engine:
             problems = scd2_invariants(out, e.surrogate_key, e.keys)
             if problems:
                 raise CheckStop("Type 2 checks failed: " + "; ".join(problems))
+        elif backfill == "replay" and existing is not None and e.mode not in ("scd1", "scd2"):
+            # Replayed rows join the table: they replace rows with the same key, or are added.
+            keep = existing.join(df.select(e.keys), on=e.keys, how="anti") if e.keys else existing
+            out = pl.concat([keep, df], how="diagonal_relaxed")
+            info = f"replayed {plural(df.height, 'row')}"
         elif e.mode == "incremental" and existing is not None and backfill != "full":
             keep = existing.join(df.select(e.keys), on=e.keys, how="anti") if e.keys else existing
             out = pl.concat([keep, df], how="diagonal_relaxed")
@@ -530,7 +575,8 @@ class Engine:
             "fabric_desktop_run_id": self.run_id, "fabric_desktop_metadata": self.project.version,
             "fabric_desktop_logic": self.project.fingerprint(e)})
         wm_col = e.spec.get("load", {}).get("watermark")
-        if wm_col and wm_col in df.columns and df.height and df[wm_col].max() is not None:
+        # Replayed rows are old rows: they never move the watermark.
+        if wm_col and backfill != "replay" and wm_col in df.columns and df.height and df[wm_col].max() is not None:
             self.store.meta_append("watermarks", [{"entity": e.name, "value": _wm_text(df[wm_col].max()),
                                                    "run_id": self.run_id}])
         res.rows_written, res.delta_version = df.height, version

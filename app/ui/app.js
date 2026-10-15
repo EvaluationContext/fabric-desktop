@@ -262,6 +262,7 @@ async function renderHome() {
     summary,
     signInCallout(),
     attention,
+    h("div", { class: "home-attention", id: "home-fresh" }),
     h("div", { class: "home-two" },
       h("section", { class: "card pad" }, h("h2", {}, "Running now"), running),
       h("section", { class: "card pad" }, h("h2", {}, "Coming up"), upcoming)),
@@ -293,10 +294,17 @@ async function renderHome() {
   const live = activity.items.filter((i) => i.status === "running" && !i.stale);
 
   const problems = failing.length + cloudFailed.length;
-  summary.textContent = [
-    problems ? `${problems} ${problems === 1 ? "thing needs" : "things need"} your attention` : "Nothing needs your attention",
-    live.length ? `${live.length} running` : "",
-  ].filter(Boolean).join(" · ") + ".";
+  // Late tables (dataops.js) count too; they may arrive after the runs, so the line is redrawn then.
+  state.homeSummary = () => {
+    const late = (fresh.items || []).filter((x) => x.status === "late").length;
+    const total = problems + late;
+    summary.textContent = [
+      total ? `${total} ${total === 1 ? "thing needs" : "things need"} your attention` : "Nothing needs your attention",
+      live.length ? `${live.length} running` : "",
+    ].filter(Boolean).join(" · ") + ".";
+  };
+  state.homeSummary();
+  renderFreshHome();
 
   attention.replaceChildren(problems ? [h("h2", {}, "Needs your attention"),
     ...failing.slice(0, 5).map((r) => h("div", { class: "card attention" },
@@ -2183,5 +2191,6 @@ checkComponents().finally(() => {
     state.meta.project = await rpc("meta_project").catch(() => state.meta.project);
     render();
     trackFabricJobs();
+    checkFreshness();
   }, "Could not start the Python sidecar");
 });
