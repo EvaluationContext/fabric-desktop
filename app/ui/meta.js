@@ -92,7 +92,10 @@ async function renderMetadata() {
       h("div", { class: "head-actions" },
         envPicker(),
         btn("New entity", "add", newEntityDialog, "tool outline"),
-        btn("Run all", "play", () => runEntities(null), "tool primary", { disabled: p.errors.length ? true : null }))),
+        inFabric(p, m.env) ? btn("Schedule", "history", () => scheduleMetaRuns(m.env), "tool outline",
+          { title: `Run every entity in ${ENV_LABEL[m.env]} on a schedule, on Fabric capacity` }) : null,
+        btn(inFabric(p, m.env) ? "Run all in Fabric" : "Run all", "play", () => runEntities(null), "tool primary",
+          { disabled: p.errors.length ? true : null }))),
     problemsBanner(p.errors),
     h("div", { class: "subtabs" }, tabs.map(([id, label]) =>
       h("button", { class: `tab${m.tab === id ? " active" : ""}`, onclick: () => goMeta(id) }, label))),
@@ -100,6 +103,11 @@ async function renderMetadata() {
   const render = { entities: renderEntitiesTab, layers: renderLayersTab, keys: renderKeysTab, sources: renderSourcesTab,
     runs: renderRunsTab, health: renderHealthTab, model: renderModelTab, environments: renderEnvTab }[m.tab];
   await render(body, p);
+}
+
+// Where an environment's runs execute: "local" (this PC) or "fabric" (the workspace's capacity).
+function inFabric(p, env) {
+  return (p.environments?.[env] || {}).compute === "fabric";
 }
 
 function envPicker() {
@@ -351,12 +359,41 @@ function dataTable(preview) {
 async function runEntities(names, opts = {}) {
   const p = state.meta.project;
   const label = names ? names.join(", ") : `all ${p.entities.length} entities`;
-  toast(`Running ${label} in ${ENV_LABEL[state.meta.env]}...`);
-  const results = await metaCall("meta_run", { names, env: state.meta.env, backfill: opts.backfill || null, cascade: !!opts.cascade }, "Run blocked");
+  const env = state.meta.env;
+  if (inFabric(p, env)) {
+    if (!state.user && !(await signIn())) return;
+    toast(`Sending ${label} to Fabric for ${ENV_LABEL[env]}...`);
+  } else {
+    toast(`Running ${label} in ${ENV_LABEL[env]}...`);
+  }
+  const results = await metaCall("meta_run", { names, env, backfill: opts.backfill || null, cascade: !!opts.cascade }, "Run blocked");
   if (!results) return;
+  if (results[0]?.status === "submitted") return watchMetaFabricRun(results[0]);
   const decision = results.find((r) => r.status === "needs_decision");
   showRunResults(results, decision);
   render();
+}
+
+// A run on Fabric capacity: say it started, then show the results when the runner has saved them.
+async function watchMetaFabricRun(run) {
+  toast(`${ENV_LABEL[run.env]} is running in Fabric. Results show here when it finishes; it is also in Monitor.`);
+  render();
+  for (let wait = 10; ; wait = Math.min(wait * 1.5, 60)) {
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    const res = await attempt(() => rpc("meta_fabric_result", { request_id: run.request_id }));
+    if (!res) return;
+    if (!["Completed", "Failed", "Cancelled", "Deduped"].includes(res.status)) continue;
+    if (res.results) {
+      showRunResults(res.results, res.results.find((r) => r.status === "needs_decision"));
+    } else {
+      showDialog(`The Fabric run ${res.status.toLowerCase()}`, h("div", { class: "scroll" },
+        h("p", { class: "text" }, res.message || "The runner stopped before it saved any results."),
+        h("p", { class: "muted-text" }, "Open it from Monitor to see the notebook's output in Fabric.")),
+      [btn("Close", null, closeDialog, "tool primary")]);
+    }
+    if (state.view === "metadata") render();
+    return;
+  }
 }
 
 function showRunResults(results, decision) {
@@ -494,7 +531,8 @@ async function renderEnvTab(body, p) {
       h("div", { class: "row" }, h("b", {}, ENV_LABEL[env]), h("span", { class: "spacer" }),
         btn("Change", null, () => pickEnvTarget(env), "tool link small")),
       h("div", { class: "muted-text" }, where),
-      h("div", { class: "muted-text small" }, p.layers.map((l) => l.lakehouse).concat("LH_Meta").join(" · ")));
+      h("div", { class: "muted-text small" }, p.layers.map((l) => l.lakehouse).concat("LH_Meta").join(" · ")),
+      computeChoice(env, local, cfg.compute === "fabric"));
   };
   const promoteRow = (source, target) => {
     const box = h("div", { class: "muted-text" }, "Checking the promote gate...");
@@ -517,6 +555,56 @@ async function renderEnvTab(body, p) {
   };
   body.replaceChildren(h("div", { class: "env-cards" }, ["dev", "test", "prod"].map(card)),
     promoteRow("dev", "test"), promoteRow("test", "prod"));
+}
+
+// This PC or Fabric runs the environment's entities. Fabric can only reach tables in OneLake.
+function computeChoice(env, local, fabric) {
+  const option = (value, label, on) => h("button", {
+    class: on ? "on" : null, disabled: value === "fabric" && local ? true : null,
+    title: value === "fabric" && local ? `${ENV_LABEL[env]} keeps its tables on this PC. Point it at a workspace first.` : null,
+    onclick: on ? null : () => setCompute(env, value),
+  }, label);
+  return h("div", { class: "compute-row" }, h("span", { class: "muted-text small" }, "Runs on"),
+    h("div", { class: "seg" }, option("local", "This PC", !fabric), option("fabric", "Fabric", fabric)),
+    fabric ? btn("Schedules", "history", () => scheduleMetaRuns(env), "tool link small") : null);
+}
+
+async function setCompute(env, compute) {
+  if (compute === "fabric" && !state.user && !(await signIn())) return;
+  const res = await metaCall("meta_set_compute", { env, compute });
+  if (!res) return;
+  state.meta.project = res;
+  toast(compute === "fabric" ? `${ENV_LABEL[env]} now runs in Fabric. The first run uploads the project to LH_Meta and publishes a runner notebook.`
+    : `${ENV_LABEL[env]} now runs on this PC.`);
+  render();
+}
+
+async function scheduleMetaRuns(env) {
+  if (!(await ensureSignedIn())) return;
+  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, "Loading schedules..."));
+  const form = scheduleForm();
+  const show = (res) => {
+    list.replaceChildren(res.schedules.length ? h("table", { class: "mini" }, h("tbody", {}, res.schedules.map((s) => h("tr", {},
+      h("td", {}, s.enabled ? h("span", { class: "pill-s pass" }, "On") : h("span", { class: "pill-s neu" }, "Off")),
+      h("td", {}, s.text),
+      h("td", { class: "n" }, btn("Remove", "delete", async () => {
+        const next = await attempt(() => rpc("meta_delete_schedule", { env, schedule_id: s.id }), "Not removed");
+        if (next) show(next);
+      }, "tool link small"))))))
+      : h("p", { class: "muted-text" }, "No schedules yet."));
+  };
+  const add = async () => {
+    toast(`Uploading the project and adding the schedule for ${ENV_LABEL[env]}...`);
+    const res = await metaCall("meta_add_schedule", { env, schedule: form.value() }, "Schedule not added");
+    if (res) { show(res); toast("Scheduled. Fabric runs every entity on its own capacity, even when this PC is off."); }
+  };
+  showDialog(`Schedule ${ENV_LABEL[env]} runs in Fabric`, h("div", { class: "scroll" },
+    h("p", { class: "text" }, `Each scheduled run processes every entity in ${ENV_LABEL[env]}, in layer order, using the project as it was last uploaded (each run or promote from this app uploads it).`),
+    list, h("b", {}, "Add a schedule"), form.fields),
+  [btn("Close", null, closeDialog, "tool outline"), btn("Add schedule", "add", add, "tool primary")]);
+  form.sync();
+  const res = await attempt(() => rpc("meta_schedules", { env }), "Could not read schedules");
+  if (res) show(res);
 }
 
 async function pickEnvTarget(env) {

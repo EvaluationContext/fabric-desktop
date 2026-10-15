@@ -11,6 +11,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +21,12 @@ import polars as pl
 from . import maintenance, profiling, semantic
 from .auth import FABRIC_SCOPES
 from .fabric_api import FabricClient
+from .fabric_compute import BUNDLE_DIR, RESULTS_DIR, RUNNER, bundle_files, bundle_hash, run_parameters, runner_ipynb
 from .fabric_run import TERMINAL, describe_schedule, fabric_ipynb, schedule_configuration
 from .meta.engine import Engine, RunResult, apply_clean
+from .meta.project import GateError, validate
 from .meta.store import META_LAKEHOUSE, META_SCHEMAS, LocalStore, OneLakeStore
+from .onelake import FileStore
 
 NOTEBOOK_JOB = "RunNotebook"
 FABRIC_APP = "https://app.fabric.microsoft.com"
@@ -225,6 +230,139 @@ class CloudMixin:
             if job:
                 r["maintenance"] = job.get("status") if job.get("status") == "Failed" else "queued"
                 r["maintenance_message"] = job.get("message", "")
+
+    # ---- metadata runs on Fabric capacity (compute = "fabric" in environments.toml)
+
+    def _compute(self, project: Any, env: str) -> str:
+        return self._env_cfg(project, env).get("compute", "local")
+
+    def meta_set_compute(self, env: str, compute: str) -> dict[str, Any]:
+        """Run an environment's metadata runs on this PC or on its workspace's Fabric capacity."""
+        if compute not in ("local", "fabric"):
+            raise ValueError("compute is local (this PC) or fabric")
+        project = self._project()  # type: ignore[attr-defined]
+        cfg = self._env_cfg(project, env)
+        if compute == "fabric" and cfg.get("target", "onelake" if env != "dev" else "local") == "local":
+            raise ValueError(f"{env.title()} keeps its tables on this PC, which Fabric can't reach. "
+                             f"Point {env.title()} at a Fabric workspace first, then run it in Fabric.")
+        envs = {k: dict(v) for k, v in project.environments.items()}
+        envs.setdefault(env, {})["compute"] = compute
+        self._write_environments(project, envs)  # type: ignore[attr-defined]
+        return self.meta_project()  # type: ignore[attr-defined]
+
+    @property
+    def _bundles_file(self) -> Path:
+        return self.root / "fabric_bundles.json"
+
+    def _fabric_bundle(self, project: Any, env: str, store: Any) -> dict[str, str]:
+        """Upload the engine and the project to the environment's LH_Meta and publish the runner
+        notebook, unless the same bundle is already there. Returns where the runner is."""
+        if not isinstance(store, OneLakeStore):
+            raise ValueError(f"{env.title()} keeps its tables on this PC, so it can't run in Fabric")
+        ws = store.workspace_id
+        meta_id = store.lakehouse_ids.get(META_LAKEHOUSE)
+        if not meta_id:
+            raise LookupError(f"{META_LAKEHOUSE} doesn't exist in the {env} workspace yet; promote to {env} first")
+        config: dict[str, Any] = {"env": env, "workspace_id": ws, "lakehouse_ids": dict(store.lakehouse_ids),
+                                  "optimize_after_run": self._optimize_after_run(project, env)}
+        if self._uses_keys(project):  # type: ignore[attr-defined]
+            keys_store = self._keys_store(project, env, create=env == "dev")  # type: ignore[attr-defined]
+            if isinstance(keys_store, OneLakeStore):
+                config |= {"keys_workspace_id": keys_store.workspace_id, "keys_lakehouse_ids": dict(keys_store.lakehouse_ids)}
+        files = bundle_files(project.root, config)
+        digest = bundle_hash(files)
+        try:
+            state = json.loads(self._bundles_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        key = f"{env}:{ws}"
+        known = state.get(key, {})
+        if known.get("hash") != digest or not known.get("runner_id"):
+            token = self.auth.storage_token()  # type: ignore[attr-defined]  # once: MSAL isn't thread-safe
+            fs = FileStore(lambda: token)
+            fs.delete(ws, meta_id, BUNDLE_DIR)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda item: fs.upload(ws, meta_id, f"{BUNDLE_DIR}/{item[0]}", item[1]), files.items()))
+            fabric = self.fabric  # type: ignore[attr-defined]
+            item = fabric.save_notebook(ws, RUNNER, json.dumps(runner_ipynb(ws, meta_id)).encode())
+            runner_id = item.get("id") or (self._notebook_item(RUNNER, ws) or {}).get("id")
+            if not runner_id:
+                raise LookupError(f"{RUNNER} was published but Fabric didn't return its id; try again")
+            known = {"hash": digest, "runner_id": runner_id, "at": _now(), "version": project.version}
+            state[key] = known
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._bundles_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        return {"workspace_id": ws, "meta_lakehouse_id": meta_id, "runner_id": known["runner_id"]}
+
+    def _check_runnable(self, project: Any, store: Any) -> None:
+        """The gates a run checks first, here, so a blocked run fails at once rather than in Fabric."""
+        errors = validate(project, dt.date.today())
+        if errors:
+            raise GateError("save", errors)
+        Engine(project, store).check_deployed()
+
+    def _run_in_fabric(self, project: Any, env: str, store: Any, names: list[str] | None,
+                       backfill: str | None, cascade: bool) -> list[dict[str, Any]]:
+        self._check_runnable(project, store)
+        where = self._fabric_bundle(project, env, store)
+        request_id = f"fd-{dt.datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
+        label = ", ".join(names) if names else f"all {len(project.entities)} entities"
+        job_id = self.fabric.run_item_job(where["workspace_id"], where["runner_id"], "RunNotebook",  # type: ignore[attr-defined]
+                                          run_parameters(names, backfill, cascade, request_id))
+        self._log_fabric_run({"kind": "Metadata run", "name": label, "env": env, "workspace_id": where["workspace_id"],
+                              "workspace_name": self._env_cfg(project, env).get("workspace_name", ""),
+                              "item_id": where["runner_id"], "job_id": job_id, "request_id": request_id,
+                              "meta_lakehouse_id": where["meta_lakehouse_id"],
+                              "url": f"{FABRIC_APP}/groups/{where['workspace_id']}/synapsenotebooks/{where['runner_id']}"
+                                     "?experience=fabric-developer"})
+        return [{"entity": label, "status": "submitted", "run_id": "", "env": env, "job_id": job_id,
+                 "request_id": request_id, "message": f"Running in Fabric on the {env.title()} workspace's capacity"}]
+
+    def meta_fabric_result(self, request_id: str) -> dict[str, Any]:
+        """A Fabric run's status, and its per-entity results once the runner has saved them."""
+        run = next((r for r in self.fabric_runs(200) if r.get("request_id") == request_id), None)
+        if run is None:
+            raise KeyError(f"no Fabric run {request_id}")
+        out: dict[str, Any] = {"status": run["status"], "message": run.get("message", ""), "results": None}
+        if run["status"] in TERMINAL:
+            data = FileStore(lambda: self.auth.storage_token()).read_bytes(  # type: ignore[attr-defined]
+                run["workspace_id"], run["meta_lakehouse_id"], f"{RESULTS_DIR}/{request_id}.json")
+            if data:
+                out["results"] = json.loads(data)["results"]
+        return out
+
+    def meta_schedules(self, env: str) -> dict[str, Any]:
+        project = self._project()  # type: ignore[attr-defined]
+        ws = self._env_cfg(project, env).get("workspace_id", "")
+        if self._compute(project, env) != "fabric" or not ws:
+            return {"env": env, "compute": "local", "published": False, "schedules": []}
+        runner = self._notebook_item(RUNNER, ws)
+        schedules = self.fabric.list_schedules(ws, runner["id"], "RunNotebook") if runner else []  # type: ignore[attr-defined]
+        return {"env": env, "compute": "fabric", "published": runner is not None,
+                "schedules": [s | {"text": describe_schedule(s)} for s in schedules]}
+
+    def meta_add_schedule(self, env: str, schedule: dict[str, Any]) -> dict[str, Any]:
+        """Schedule "run every entity" in Fabric, from the project as it is now."""
+        project = self._project()  # type: ignore[attr-defined]
+        if self._compute(project, env) != "fabric":
+            raise ValueError(f"Set {env.title()} to run in Fabric first; scheduled runs need Fabric compute")
+        config = schedule_configuration(schedule.get("kind", "daily"), schedule.get("times"),
+                                        schedule.get("every_minutes"), schedule.get("weekdays"),
+                                        schedule.get("time_zone") or "UTC")
+        store = self._store(project, env, create=env == "dev")  # type: ignore[attr-defined]
+        self._check_runnable(project, store)
+        where = self._fabric_bundle(project, env, store)
+        self.fabric.create_schedule(where["workspace_id"], where["runner_id"], "RunNotebook", config)  # type: ignore[attr-defined]
+        return self.meta_schedules(env)
+
+    def meta_delete_schedule(self, env: str, schedule_id: str) -> dict[str, Any]:
+        project = self._project()  # type: ignore[attr-defined]
+        ws = self._env_cfg(project, env).get("workspace_id", "")
+        runner = self._notebook_item(RUNNER, ws) if ws else None
+        if runner is None:
+            raise LookupError(f"There is no runner notebook in the {env.title()} workspace")
+        self.fabric.delete_schedule(ws, runner["id"], "RunNotebook", schedule_id)  # type: ignore[attr-defined]
+        return self.meta_schedules(env)
 
     # ---- Direct Lake semantic model over a layer
 

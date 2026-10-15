@@ -25,7 +25,8 @@ METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "crea
            "meta_delete_source_system", "meta_keys_sync", "meta_key_notebook",
            "run_notebook_in_fabric", "fabric_runs", "cancel_fabric_run", "notebook_schedules", "add_notebook_schedule",
            "delete_notebook_schedule", "meta_health", "meta_optimize", "meta_set_maintenance", "meta_model_plan",
-           "meta_build_model", "meta_profile", "meta_profile_preview", "meta_add_rules"}
+           "meta_build_model", "meta_profile", "meta_profile_preview", "meta_add_rules",
+           "meta_set_compute", "meta_fabric_result", "meta_schedules", "meta_add_schedule", "meta_delete_schedule"}
 
 
 def handle(service: Service, line: str) -> dict:

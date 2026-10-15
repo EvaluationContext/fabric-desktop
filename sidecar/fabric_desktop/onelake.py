@@ -110,3 +110,31 @@ class FileStore:
                 for chunk in resp.iter_content(1 << 20):
                     f.write(chunk)
         return dest
+
+    def read_bytes(self, workspace_id: str, lakehouse_id: str, path: str) -> bytes | None:
+        """A small file's content, or None when it doesn't exist."""
+        url = f"https://{DFS_HOST}/{workspace_id}/{lakehouse_id}/{path.strip('/')}"
+        resp = self._http.get(url, headers=self._headers(), timeout=60)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.content
+
+    def upload(self, workspace_id: str, lakehouse_id: str, path: str, data: bytes) -> None:
+        """Create or replace a file: create, append, then flush (the ADLS Gen2 way)."""
+        url = f"https://{DFS_HOST}/{workspace_id}/{lakehouse_id}/{path.strip('/')}"
+        steps = [("PUT", {"resource": "file"}, None),
+                 ("PATCH", {"action": "append", "position": "0"}, data),
+                 ("PATCH", {"action": "flush", "position": str(len(data))}, None)]
+        for method, params, body in steps:
+            if body is not None and not body:
+                continue  # an empty file needs no append
+            resp = self._http.request(method, url, params=params, data=body, headers=self._headers(), timeout=300)
+            resp.raise_for_status()
+
+    def delete(self, workspace_id: str, lakehouse_id: str, path: str) -> None:
+        """Delete a file or a whole folder; a missing one is fine."""
+        url = f"https://{DFS_HOST}/{workspace_id}/{lakehouse_id}/{path.strip('/')}"
+        resp = self._http.request("DELETE", url, params={"recursive": "true"}, headers=self._headers(), timeout=300)
+        if resp.status_code != 404:
+            resp.raise_for_status()

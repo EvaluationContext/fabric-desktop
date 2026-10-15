@@ -1273,14 +1273,8 @@ const TIME_ZONES = {
 };
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-async function scheduleNotebook() {
-  const nb = state.notebook;
-  if (!nb.lakehouse) {
-    toast("Attach a lakehouse first. The schedule runs the notebook in that lakehouse's workspace.", true);
-    return;
-  }
-  if (!(await ensureSignedIn())) return;
-  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, "Loading schedules..."));
+// The repeat, times, days and time zone fields of a Fabric schedule, shared by notebooks and metadata runs.
+function scheduleForm() {
   const kind = h("select", {}, h("option", { value: "daily" }, "Every day"), h("option", { value: "weekly" }, "Some days of the week"),
     h("option", { value: "cron" }, "Every few minutes"));
   const times = h("input", { value: "06:00", placeholder: "06:00, 18:00" });
@@ -1299,6 +1293,23 @@ async function scheduleNotebook() {
     daysField.hidden = kind.value !== "weekly";
   };
   kind.addEventListener("change", sync);
+  return {
+    fields: [h("label", { class: "field" }, "Repeat", kind), timesField, daysField, minutesField, zoneField],
+    sync,
+    value: () => ({ kind: kind.value, times: times.value.split(","), every_minutes: Number(minutes.value),
+      weekdays: days.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value), time_zone: zone.value }),
+  };
+}
+
+async function scheduleNotebook() {
+  const nb = state.notebook;
+  if (!nb.lakehouse) {
+    toast("Attach a lakehouse first. The schedule runs the notebook in that lakehouse's workspace.", true);
+    return;
+  }
+  if (!(await ensureSignedIn())) return;
+  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, "Loading schedules..."));
+  const form = scheduleForm();
 
   const show = (res) => {
     list.replaceChildren(res.schedules.length ? h("table", { class: "mini" }, h("tbody", {}, res.schedules.map((s) => h("tr", {},
@@ -1311,17 +1322,16 @@ async function scheduleNotebook() {
       : h("p", { class: "muted-text" }, res.published ? "No schedules yet." : "Not published yet. Adding a schedule publishes it."));
   };
   const add = async () => {
-    const schedule = { kind: kind.value, times: times.value.split(","), every_minutes: Number(minutes.value),
-      weekdays: days.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value), time_zone: zone.value };
+    const schedule = form.value();
     toast(`Publishing ${nb.name} and adding the schedule...`);
     const res = await attempt(() => rpc("add_notebook_schedule", { ...notebookPayload(), schedule }), "Schedule not added");
     if (res) { nb.dirty = false; renderChrome(); show(res); toast("Scheduled. Fabric runs the published notebook on its own capacity."); }
   };
   showDialog(`Schedule ${nb.name} in Fabric`, h("div", { class: "scroll" },
     h("p", { class: "text" }, `Fabric runs the published notebook in ${nb.lakehouse.workspace_name} on its own capacity, even when this PC is off. Adding a schedule publishes what is on screen first.`),
-    list, h("b", {}, "Add a schedule"), h("label", { class: "field" }, "Repeat", kind), timesField, daysField, minutesField, zoneField),
+    list, h("b", {}, "Add a schedule"), form.fields),
   [btn("Close", null, closeDialog, "tool outline"), btn("Add schedule", "add", add, "tool primary")]);
-  sync();
+  form.sync();
   const res = await attempt(() => rpc("notebook_schedules", { name: nb.name, lakehouse_ref: nb.lakehouse }), "Could not read schedules");
   if (res) show(res);
 }
