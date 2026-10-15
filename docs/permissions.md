@@ -72,7 +72,9 @@ Or with Microsoft Graph PowerShell (`Connect-MgGraph -Scopes Application.ReadWri
 New-MgServicePrincipal -AppId e406a681-f3d4-42a8-90b6-c2b029497af1   # Azure Storage; repeat with each id above
 ```
 
-A command that says the service principal already exists is fine: that API is already there. Creating them needs Application Administrator, Cloud Application Administrator or Global Administrator. Then go back to **API permissions** and select **Grant admin consent** again.
+A command that fails with "already exists" or "The service principal cannot be created ... because the service principal name https://... is already in use" is fine: that API's service principal is already in your tenant. Check any of them with `az ad sp show --id <id> --query displayName`. Creating them needs Application Administrator, Cloud Application Administrator or Global Administrator. Then go back to **API permissions** and select **Grant admin consent** again.
+
+If consent still fails after every API shows up with `az ad sp show`, check that you're granting consent in the same tenant the app is registered in (`az account show --query tenantId` against the app's **Directory (tenant) ID** on its Overview page).
 
 If you'd rather not add an API yet (for example Azure Key Vault or Azure Service Management), remove its permissions from the app registration instead. Consent then succeeds for the rest, and you can add it later.
 
