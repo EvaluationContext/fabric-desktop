@@ -1,7 +1,8 @@
 """Day-to-day data engineering, mixed into ``Service``: compare a table across environments or
-versions before a promote, fix and replay quarantined rows, and freshness promises with alerts.
+versions before a promote, review schema drift, fix and replay quarantined rows, and freshness
+promises with alerts.
 
-Each feature's logic lives in its own module under ``meta/`` (compare, freshness) or in the
+Each feature's logic lives in its own module under ``meta/`` (compare, drift, freshness) or in the
 engine (replay); this file only connects them to the project, the stores and the UI.
 """
 
@@ -16,6 +17,7 @@ import requests
 
 from .meta import Engine, impact
 from .meta import compare as compare_mod
+from .meta import drift as drift_mod
 from .meta import freshness as freshness_mod
 from .meta.project import ENVIRONMENTS
 
@@ -70,6 +72,45 @@ class DataOpsMixin:
             tables.append({"entity": name, "state": state, "last_run": run["started_at"] if run else None,
                            "rows": run["rows_written"] if run else None})
         return {"source": source, "target": target, "tables": tables, "problem": None}
+
+    # ---- schema drift
+
+    def meta_drift(self, name: str, env: str = "dev") -> dict[str, Any]:
+        """How the entity's source differs from what its contract expects, right now."""
+        project = self._project()  # type: ignore[attr-defined]
+        e = project.entities[name]
+        src = e.spec.get("source", {})
+        source = None
+        problem = None
+        try:
+            store = self._store(project, env)  # type: ignore[attr-defined]
+            if "entity" in src:
+                up = project.entities[src["entity"]]
+                source = store.read(project.layer(up.layer).lakehouse, up.schema, up.table)
+                if source is None:
+                    problem = f"{up.name} hasn't been loaded in {env} yet"
+            elif "files" in src:
+                source, _ = store.read_files(project.layer(e.layer).lakehouse, src["files"])
+                if source is None:
+                    problem = f"no files match {src['files']} yet"
+        except Exception as exc:  # the config side is still useful
+            problem = str(exc)
+        history = []
+        try:
+            h = store.meta("schema_history").filter(pl.col("entity") == name).reverse()
+            history = _rows(h, 10)
+        except Exception:
+            pass
+        return drift_mod.detect(project, e, source) | {"env": env, "problem": problem, "history": history}
+
+    def meta_drift_apply(self, name: str, add: dict[str, str] | None = None, retype: dict[str, str] | None = None,
+                         rename: dict[str, str] | None = None, remove: list[str] | None = None,
+                         policy: str | None = None) -> dict[str, Any]:
+        """Write the drift decisions into the entity file, through the save gate."""
+        project = self._project()  # type: ignore[attr-defined]
+        text = project.entities[name].path.read_text(encoding="utf-8")
+        new = drift_mod.apply(text, add=add, retype=retype, rename=rename, remove=remove, policy=policy)
+        return self.meta_save_entity(name, new)  # type: ignore[attr-defined]
 
     # ---- quarantine
 

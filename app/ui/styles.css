@@ -578,3 +578,6 @@ h2.flush { margin: 0; }
 .qcell:hover, .qcell:focus { border-color: var(--border-input); background: var(--surface); }
 .qcell.changed { border-color: #0f548c; background: #e8f1fb; font-weight: 600; }
 .fresh-ok { display: flex; align-items: center; gap: 6px; }
+.drift-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--border-soft); }
+.drift-row select { max-width: 160px; flex: none; }
+.drift-row .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

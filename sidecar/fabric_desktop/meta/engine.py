@@ -293,13 +293,17 @@ class Engine:
                 if wm is not None and wm_col in df.columns:
                     df = df.filter(pl.col(wm_col) > _wm_literal(wm, df.schema[wm_col]))
                     detail = f"incremental, {wm_col} after {wm}"
+        renames = {k: v for k, v in src.get("rename", {}).items() if k in df.columns}
+        if renames:  # columns the source renamed, mapped back to the names the contract uses
+            df = df.rename(renames)
+            detail += "; renamed " + ", ".join(f"{k} to {v}" for k, v in renames.items())
         res.rows_read = df.height
         self._step(res, "read", t0, df.height, detail)
         return df
 
     def _contract_in(self, e: Entity, df: pl.DataFrame, res: RunResult) -> pl.DataFrame:
         t0 = time.perf_counter()
-        policy = self.project.layer(e.layer).drift
+        policy = e.spec.get("contract", {}).get("drift") or self.project.layer(e.layer).drift
         own = set(e.columns) | set(e.derived) | set(e.hook_adds)
         self._evolved = []
         src = e.spec.get("source", {})

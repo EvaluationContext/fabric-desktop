@@ -322,6 +322,7 @@ async function renderEntity() {
             h("div", {}, h("span", { class: "muted-text small" }, "Feeds"),
               e.impact.length ? e.impact.map((r) => h("button", { class: "node", onclick: () => openEntity(r) }, entityName(r)))
                 : h("span", { class: "muted-text small" }, "Nothing reads it yet")))),
+        driftCard(e),
         freshnessCard(e),
         recentRuns)),
     quarantineCard(e),

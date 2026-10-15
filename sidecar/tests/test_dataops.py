@@ -177,3 +177,42 @@ def test_teams_card_shape():
     card = dataops_service.teams_card("t", ["a"])
     content = card["attachments"][0]["content"]
     assert content["type"] == "AdaptiveCard" and content["body"][1]["text"] == "a"
+
+
+# ---- schema drift review
+
+def test_drift_review_shows_renamed_new_and_retyped_columns_and_settles_them(svc):
+    proj = svc._project()
+    files = proj.local_data / "dev" / "LH_Bronze" / "Files" / "landing" / "orders"
+    for f in files.glob("*.csv"):
+        f.unlink()
+    (files / "orders_2026-10-05.csv").write_text(
+        "order_id,cust_id,order_date,amount,discount,status,modified_at,channel\n"
+        "201,1,2026-10-05,10,none,shipped,2026-10-05,web\n", encoding="utf-8")
+    d = svc.meta_drift("bronze.orders")
+    assert d["checked"] and d["problem"] is None
+    assert {x["column"] for x in d["added"]} == {"cust_id", "channel"}
+    assert [x["column"] for x in d["dropped"]] == ["customer_id"]
+    assert d["retyped"] == [{"column": "discount", "contract": "float64", "source": "string"}]
+    assert svc.meta_run(["bronze.orders"])[0]["status"] == "failed"  # the run stops on the missing column
+
+    saved = svc.meta_drift_apply("bronze.orders", add={"channel": "string"}, rename={"customer_id": "cust_id"},
+                                 policy="strict")
+    assert saved["errors"] == []
+    assert 'rename = { "cust_id" = "customer_id" }' in saved["text"] and 'channel = "string"' in saved["text"]
+    assert 'drift = "strict"' in saved["text"]
+    after = svc.meta_drift("bronze.orders")
+    assert after["added"] == [] and after["dropped"] == [] and after["policy"] == "strict"
+    res = svc.meta_run(["bronze.orders"])[0]
+    assert res["status"] == "ok" and res["quarantined"] == 1  # "none" isn't a number: held, not loaded
+    held = svc.meta_quarantine("bronze.orders")["rows"][0]
+    assert held["customer_id"] == "1" and held["channel"] == "web"  # renamed back, and the new column kept
+
+    # A column the source drops can also leave the contract; the save gate says who still needs it.
+    gone = svc.meta_drift_apply("bronze.orders", remove=["channel"], policy="")
+    assert 'channel = "string"' not in gone["text"] and "drift =" not in gone["text"]
+
+
+def test_drift_on_an_entity_source_ignores_upstream_columns_it_does_not_use(svc):
+    d = svc.meta_drift("silver.orders")
+    assert d["checked"] and d["added"] == [] and d["dropped"] == [] and d["retyped"] == []

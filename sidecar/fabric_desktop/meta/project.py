@@ -430,6 +430,12 @@ def validate(project: Project, today: dt.date | None = None) -> list[str]:
             errors.append(f"{e.name}: source path {files} only exists on this PC; put the files in the "
                           f"lakehouse Files area and use a relative path")
         errors += freshness_mod.problems(e.name, s, ENVIRONMENTS)
+        own_drift = s.get("contract", {}).get("drift")
+        if own_drift is not None and own_drift not in DRIFT_POLICIES:
+            errors.append(f"{e.name}: contract drift must be one of {', '.join(DRIFT_POLICIES)}")
+        rename = s.get("source", {}).get("rename", {})
+        if not isinstance(rename, dict) or not all(isinstance(v, str) for v in rename.values()):
+            errors.append(f'{e.name}: source rename maps a source column to a contract column, like {{ cust_id = "customer_id" }}')
 
         # No mixing: never read a later layer; the same layer only when the layer allows it.
         me = project.layer_index(e.layer)

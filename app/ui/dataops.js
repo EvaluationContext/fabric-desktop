@@ -1,5 +1,6 @@
 // Day-to-day data engineering: compare a table across environments or versions (before a
-// promote), fix and replay quarantined rows, and freshness promises with Teams alerts.
+// promote), review schema drift, fix and replay quarantined rows, and freshness promises with
+// Teams alerts.
 // Loaded after meta.js. The entity page, the promote cards and Home call into this file;
 // everything else here is self-contained.
 
@@ -127,6 +128,66 @@ function promoteImpact(source, target) {
       fresh.length ? h("div", { class: "muted-text small" }, `Never run in ${ENV_LABEL[target]} yet: ${fresh.map((t) => t.entity).join(", ")}`) : null));
   }).catch(() => box.remove());
   return box;
+}
+
+// ---------- schema drift ----------
+
+// The entity page's drift card: what the source sends that the contract doesn't expect, and one
+// place to settle each difference. Decisions are written into the entity file.
+function driftCard(e) {
+  const card = h("div", { class: "card pad dataops drift" }, h("div", { class: "row" }, h("b", { class: "grow" }, "Schema drift")),
+    h("p", { class: "muted-text small" }, "Checking the source..."));
+  rpc("meta_drift", { name: e.name, env: state.meta.env }).then((d) => { if (card.isConnected) card.replaceWith(driftPanel(e, d)); })
+    .catch((err) => card.lastChild.replaceWith(h("p", { class: "muted-text small" }, friendlyError(err).text)));
+  return card;
+}
+
+function driftPanel(e, d) {
+  const add = {}, retype = {}, rename = {}, remove = new Set();
+  const policy = h("select", { "aria-label": "When the source adds columns" },
+    h("option", { value: "", selected: d.own_policy ? null : true }, `Layer default: ${DRIFT_LABEL[d.layer_policy]}`),
+    Object.entries(DRIFT_LABEL).map(([v, label]) => h("option", { value: v, selected: d.own_policy === v ? true : null }, label)));
+  const applyBtn = btn("Save to config", "save", () => apply(), "tool primary small", { disabled: true });
+  const sync = () => {
+    applyBtn.disabled = !(Object.keys(add).length || Object.keys(retype).length || Object.keys(rename).length || remove.size
+      || policy.value !== (d.own_policy || ""));
+  };
+  policy.addEventListener("change", sync);
+  const addedRows = d.added.map((c) => h("label", { class: "check drift-row" },
+    h("input", { type: "checkbox", onchange: (ev) => { if (ev.target.checked) add[c.column] = c.type; else delete add[c.column]; sync(); } }),
+    h("span", { class: "pill-s info" }, "New"), h("span", { class: "mono grow" }, c.column), h("span", { class: "muted-text small" }, `${c.type} · add to contract`)));
+  const droppedRows = d.dropped.map((c) => {
+    const pick = h("select", { "aria-label": `What to do about ${c.column}`, onchange: (ev) => {
+      delete rename[c.column]; remove.delete(c.column);
+      if (ev.target.value === "__remove") remove.add(c.column);
+      else if (ev.target.value) rename[c.column] = ev.target.value;
+      sync();
+    } }, h("option", { value: "" }, "Leave it (runs stop)"),
+    d.added.map((a) => h("option", { value: a.column }, `Renamed to ${a.column}`)),
+    c.key ? null : h("option", { value: "__remove" }, "Remove from contract"));
+    return h("div", { class: "drift-row" }, h("span", { class: "pill-s fail" }, "Gone"), h("span", { class: "mono grow" }, c.column), pick);
+  });
+  const retypedRows = d.retyped.map((c) => h("label", { class: "check drift-row" },
+    h("input", { type: "checkbox", onchange: (ev) => { if (ev.target.checked) retype[c.column] = c.source; else delete retype[c.column]; sync(); } }),
+    h("span", { class: "pill-s wrn" }, "Type"), h("span", { class: "mono grow" }, c.column),
+    h("span", { class: "muted-text small" }, `${c.contract} to ${c.source}`)));
+  const apply = async () => {
+    const res = await metaCall("meta_drift_apply", { name: e.name, add, retype, rename, remove: [...remove], policy: policy.value }, "Not saved");
+    if (!res) return;
+    toast(res.errors.length ? `Saved with ${res.errors.length} problem${res.errors.length === 1 ? "" : "s"} to fix` : "Saved. The next run uses the new contract.");
+    render();
+  };
+  const any = d.added.length || d.dropped.length || d.retyped.length;
+  return h("div", { class: "card pad dataops drift" },
+    h("div", { class: "row" }, h("b", { class: "grow" }, "Schema drift"),
+      any ? h("span", { class: "pill-s wrn" }, `${d.added.length + d.dropped.length + d.retyped.length} to review`) : null),
+    d.problem ? h("p", { class: "muted-text small" }, `Couldn't read the source in ${ENV_LABEL[d.env]}: ${friendlyError(d.problem).text}`)
+      : any ? h("p", { class: "muted-text small" }, `${d.source} in ${ENV_LABEL[d.env]} differs from the contract. Tick or pick what to change.`)
+        : h("p", { class: "muted-text small" }, `${d.source || "The source"} in ${ENV_LABEL[d.env]} matches the contract.`),
+    droppedRows, addedRows, retypedRows,
+    h("label", { class: "field" }, "When the source adds columns", policy),
+    d.history?.length ? h("div", { class: "muted-text small" }, `Kept before: ${d.history.slice(0, 3).map((x) => x.columns).join("; ")}`) : null,
+    h("div", { class: "row" }, h("span", { class: "spacer" }), applyBtn));
 }
 
 // ---------- quarantine ----------

@@ -28,7 +28,8 @@ METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "crea
            "meta_build_model", "meta_profile", "meta_profile_preview", "meta_add_rules",
            "meta_set_compute", "meta_fabric_result", "meta_schedules", "meta_add_schedule", "meta_delete_schedule",
            "meta_versions", "meta_compare", "meta_promote_impact", "meta_quarantine", "meta_replay",
-           "meta_discard_quarantine", "meta_set_freshness", "meta_freshness", "meta_alerts", "meta_set_alerts"}
+           "meta_discard_quarantine", "meta_set_freshness", "meta_freshness", "meta_alerts", "meta_set_alerts",
+           "meta_drift", "meta_drift_apply"}
 
 
 def handle(service: Service, line: str) -> dict:
