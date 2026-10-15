@@ -22,7 +22,8 @@
       </label>
     </div>
     <div class="topbar-right">
-      <span class="pill"><span data-icon="desktop" data-size="14"></span>Local compute</span>
+      <div id="env-slot" class="env-slot"></div>
+      <button id="bell" class="bell" aria-label="Activity"></button>
       <button id="account" class="avatar" title="Sign in">?</button>
     </div>
   </header>
@@ -43,10 +44,12 @@
     <main id="view" class="view"></main>
   </div>
 
+  <div id="tray-root"></div>
   <div id="dialog-root"></div>
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="icons.js"></script>
+  <script src="activity.js"></script>
   <script src="app.js"></script>
   <script src="meta.js"></script>
 </body>

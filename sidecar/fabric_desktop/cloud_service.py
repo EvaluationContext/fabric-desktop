@@ -19,12 +19,12 @@ from typing import Any
 import polars as pl
 
 from . import maintenance, profiling, semantic
-from .auth import FABRIC_SCOPES
+from .auth import FABRIC_SCOPES, STORAGE_SCOPES
 from .fabric_api import FabricClient
 from .fabric_compute import BUNDLE_DIR, RESULTS_DIR, RUNNER, bundle_files, bundle_hash, run_parameters, runner_ipynb
 from .fabric_run import TERMINAL, describe_schedule, fabric_ipynb, schedule_configuration
 from .meta.engine import Engine, RunResult, apply_clean
-from .meta.project import GateError, validate
+from .meta.project import ENVIRONMENTS, GateError, validate
 from .meta.store import META_LAKEHOUSE, META_SCHEMAS, LocalStore, OneLakeStore
 from .onelake import FileStore
 
@@ -88,6 +88,44 @@ class CloudMixin:
         except Exception:  # no client ID configured
             return None
         return FabricClient(lambda: token) if token else None
+
+    def meta_runs_all(self, limit: int = 200) -> dict[str, Any]:
+        """Metadata runs from every environment, newest first, for Monitor and Home.
+
+        Environments in OneLake are read only when the user is already signed in, so this never
+        pops a sign-in; ``unavailable`` says why an environment was left out."""
+        try:
+            project = self._project()  # type: ignore[attr-defined]
+        except Exception:  # no metadata project yet
+            return {"runs": [], "unavailable": {}}
+        signed_in = None
+        runs: list[dict[str, Any]] = []
+        unavailable: dict[str, str] = {}
+        for env in ENVIRONMENTS:
+            cfg = self._env_cfg(project, env)  # type: ignore[attr-defined]
+            local = cfg.get("target", "onelake" if env != "dev" else "local") == "local"
+            if not local and not cfg.get("workspace_id"):
+                continue  # not set up yet
+            if not local:
+                if signed_in is None:
+                    try:
+                        signed_in = bool(self.auth.silent_token(STORAGE_SCOPES)) and self._quiet_fabric() is not None  # type: ignore[attr-defined]
+                    except Exception:
+                        signed_in = False
+                if not signed_in:
+                    unavailable[env] = "Sign in to see its runs"
+                    continue
+            try:
+                rows = self.meta_runs(env, limit)  # type: ignore[attr-defined]
+            except Exception as exc:  # offline, or a lakehouse is gone
+                unavailable[env] = str(exc)
+                continue
+            for r in rows:
+                r["env"] = env
+                r["compute"] = "fabric" if str(r.get("batch_id") or "").startswith("fabric-") else "local"
+            runs += rows
+        runs.sort(key=lambda r: str(r.get("started_at") or ""), reverse=True)
+        return {"runs": runs[:limit], "unavailable": unavailable}
 
     def cancel_fabric_run(self, workspace_id: str, item_id: str, job_id: str) -> dict[str, Any]:
         self.fabric.cancel_job(workspace_id, item_id, job_id)  # type: ignore[attr-defined]

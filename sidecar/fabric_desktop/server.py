@@ -19,7 +19,7 @@ METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "crea
            "run_cell", "restart_kernel", "run_sql", "save_sql", "export_sql_csv", "table_columns", "list_notebooks", "new_notebook", "open_notebook",
            "save_notebook", "rename_notebook", "delete_notebook", "publish_notebook",
            "meta_project", "meta_init", "meta_open", "meta_set_environment", "meta_entity", "meta_save_entity",
-           "meta_new_entity", "meta_delete_entity", "meta_set_layers", "meta_run", "meta_runs", "meta_run_detail",
+           "meta_new_entity", "meta_delete_entity", "meta_set_layers", "meta_run", "meta_runs", "meta_runs_all", "meta_run_detail",
            "meta_preview", "meta_promote_check", "meta_promote", "meta_keys", "meta_set_keys_workspace",
            "meta_new_key_table", "meta_delete_key_table", "meta_key_lookup", "meta_save_source_system",
            "meta_delete_source_system", "meta_keys_sync", "meta_key_notebook",

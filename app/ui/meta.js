@@ -5,7 +5,7 @@
 state.meta = {
   project: null,       // summary from meta_project
   tab: "entities",     // entities | layers | keys | sources | runs | health | model | environments
-  env: "dev",
+  env: (() => { try { return localStorage.getItem("fd.env") || "dev"; } catch { return "dev"; } })(),  // set from the top bar
   entity: null,        // open entity detail
   layersDraft: null,   // unsaved layer edits
   runs: null,
@@ -48,7 +48,8 @@ function showGateError(err, title = "That was blocked") {
     showDialog(title, h("div", { class: "scroll" }, h("p", { class: "text" }, lines[0]),
       gateList(lines.slice(1).map((l) => l.replace(/^- /, "")))), [btn("Close", null, closeDialog, "tool primary")]);
   } else {
-    toast(text, true);
+    const f = friendlyError(text);
+    toast(f.text, true, { title, details: f.details });
   }
 }
 
@@ -90,7 +91,6 @@ async function renderMetadata() {
         h("p", { class: "sub" }, "Every table is a file in ", h("span", { class: "mono" }, p.path),
           ". Metadata version ", h("span", { class: "mono" }, p.version), ".")),
       h("div", { class: "head-actions" },
-        envPicker(),
         btn("New entity", "add", newEntityDialog, "tool outline"),
         inFabric(p, m.env) ? btn("Schedule", "history", () => scheduleMetaRuns(m.env), "tool outline",
           { title: `Run every entity in ${ENV_LABEL[m.env]} on a schedule, on Fabric capacity` }) : null,
@@ -108,14 +108,6 @@ async function renderMetadata() {
 // Where an environment's runs execute: "local" (this PC) or "fabric" (the workspace's capacity).
 function inFabric(p, env) {
   return (p.environments?.[env] || {}).compute === "fabric";
-}
-
-function envPicker() {
-  const select = h("select", { class: "env-select", "aria-label": "Environment",
-    onchange: (e) => { state.meta.env = e.target.value; state.meta.runs = null; render(); } },
-  Object.entries(ENV_LABEL).map(([id, label]) => h("option", { value: id, selected: state.meta.env === id ? true : null },
-    `Environment: ${label}`)));
-  return select;
 }
 
 function problemsBanner(errors) {
@@ -190,7 +182,7 @@ async function renderEntitiesTab(body, p) {
         h("td", {}, MODE_LABEL[e.mode] || e.mode, e.watermark ? h("span", { class: "muted-text" }, ` · ${e.watermark}`) : null),
         h("td", {}, rules),
         h("td", {}, e.custom.length ? e.custom.map((c) => h("span", { class: "pill-s cus" }, c)) : h("span", { class: "muted-text" }, "none")),
-        h("td", {}, r ? [statusPill(r.status), h("span", { class: "muted-text" }, ` ${new Date(r.started_at).toLocaleString()}`)]
+        h("td", {}, r ? [statusPill(r.status), h("span", { class: "muted-text" }, " ", when(r.started_at))]
           : h("span", { class: "muted-text" }, "never")),
         h("td", {}, e.owner));
     }))) : h("div", { class: "empty" }, h("span", { class: "title" }, "No entities yet"),
@@ -281,7 +273,16 @@ async function renderEntity() {
     e.derived.includes(c) ? h("span", { class: "pill-s pass" }, "derived") : null,
     e.hook_adds.includes(c) ? h("span", { class: "pill-s cus" }, "hook") : null));
 
-  const runs = (e.runs || []).filter((r) => r.run_id);
+  // Runs of this table in every environment; the current one is the fallback while they load.
+  const runLines = (list) => list.length ? list.slice(0, 6).map((r) => runLine(r, () => showRun(r.run_id, r.env)))
+    : [h("p", { class: "muted-text" }, e.runs?.[0]?.message || "Not run yet.")];
+  const recentRuns = h("div", { class: "card pad" },
+    h("div", { class: "row" }, h("b", { class: "grow" }, "Recent runs"), btn("All in Monitor", null, () => go("monitor"), "tool link small")),
+    ...runLines((e.runs || []).filter((r) => r.run_id).map((r) => ({ ...r, env: r.env || state.meta.env }))));
+  rpc("meta_runs_all", { limit: 300 }).then((all) => {
+    const mine = (all.runs || []).filter((r) => r.entity === e.name);
+    if (mine.length && recentRuns.isConnected) recentRuns.replaceChildren(recentRuns.firstChild, ...runLines(mine));
+  }).catch(() => {});
   setView(h("div", { class: "page" },
     h("div", { class: "page-head" },
       h("div", {},
@@ -289,7 +290,7 @@ async function renderEntity() {
         h("h1", { class: "row" }, h("span", { class: "mono" }, e.name), layerChip(e.layer)),
         h("p", { class: "sub" }, `${MODE_LABEL[e.mode] || e.mode}${e.watermark ? ` on ${e.watermark}` : ""} · owner ${e.owner || "not set"} · `,
           h("span", { class: "mono" }, e.path))),
-      h("div", { class: "head-actions" }, envPicker(),
+      h("div", { class: "head-actions" },
         btn("Delete", "delete", async () => {
           if (!(await confirmDialog(`Delete ${e.name}?`, "The entity file is removed. Its Delta table stays in the lakehouse until you delete it there.", "Delete"))) return;
           const res = await metaCall("meta_delete_entity", { name: e.name }, "Not deleted");
@@ -297,7 +298,8 @@ async function renderEntity() {
         }, "tool outline"),
         btn("Profile", "dataBarVertical", () => profileEntity(e.name), "tool outline"),
         btn("Rebuild with downstream", "sync", () => runEntities([e.name], { cascade: true }), "tool outline"),
-        btn("Run", "play", () => (dirty() ? save() : Promise.resolve()).then(() => runEntities([e.name])), "tool primary"))),
+        btn(inFabric(state.meta.project, state.meta.env) ? `Run in Fabric (${ENV_LABEL[state.meta.env]})` : `Run in ${ENV_LABEL[state.meta.env]}`, "play",
+          () => (dirty() ? save() : Promise.resolve()).then(() => runEntities([e.name])), "tool primary"))),
     h("div", { class: "card pad" },
       h("div", { class: "row" }, h("b", {}, "What happens on every run"), h("span", { class: "muted-text" }, "Grey steps are the framework. Purple is your code, at a fixed point.")),
       h("div", { class: "steps" }, stepsFor(e).map(([label, kind], i) => [i ? h("span", { class: "arrow" }, "→") : null,
@@ -311,15 +313,15 @@ async function renderEntity() {
       h("div", { class: "side" },
         h("div", { class: "card pad" }, h("b", {}, "Contract"), h("div", { class: "cols" }, cols)),
         h("div", { class: "card pad" }, h("b", {}, "Lineage"),
-          h("div", { class: "lineage" },
-            e.reads.length ? e.reads.map((r) => h("button", { class: "tool link mono", onclick: () => openEntity(r) }, r)) : h("span", { class: "muted-text" }, e.source || "no source"),
-            h("span", { class: "arrow" }, "→"), h("b", { class: "mono" }, e.name),
-            e.impact.length ? [h("span", { class: "arrow" }, "→"), e.impact.map((r) => h("button", { class: "tool link mono", onclick: () => openEntity(r) }, r))] : null)),
-        h("div", { class: "card pad" }, h("b", {}, `Recent runs in ${ENV_LABEL[state.meta.env]}`),
-          runs.length ? h("table", { class: "mini" }, h("tbody", {}, runs.slice(0, 6).map((r) => h("tr", { class: "click", onclick: () => showRun(r.run_id) },
-            h("td", {}, statusPill(r.status)), h("td", {}, new Date(r.started_at).toLocaleString()),
-            h("td", { class: "n" }, `${r.rows_written} rows`), h("td", { class: "n" }, `${r.seconds}s`)))))
-            : h("p", { class: "muted-text" }, e.runs?.[0]?.message || "Not run yet.")))),
+          h("div", { class: "lineage3" },
+            h("div", {}, h("span", { class: "muted-text small" }, "Reads"),
+              e.reads.length ? e.reads.map((r) => h("button", { class: "node", onclick: () => openEntity(r) }, entityName(r)))
+                : h("span", { class: "node plain" }, e.source || "no source")),
+            h("div", {}, h("span", { class: "muted-text small" }, "This table"), h("span", { class: "node self" }, entityName(e.name))),
+            h("div", {}, h("span", { class: "muted-text small" }, "Feeds"),
+              e.impact.length ? e.impact.map((r) => h("button", { class: "node", onclick: () => openEntity(r) }, entityName(r)))
+                : h("span", { class: "muted-text small" }, "Nothing reads it yet")))),
+        recentRuns)),
     keysCard(e),
     e.preview ? h("div", { class: "card pad" }, h("b", {}, `Data in ${ENV_LABEL[state.meta.env]} · ${e.preview.total} rows`), dataTable(e.preview)) : null));
 }
@@ -368,30 +370,46 @@ async function runEntities(names, opts = {}) {
   }
   const results = await metaCall("meta_run", { names, env, backfill: opts.backfill || null, cascade: !!opts.cascade }, "Run blocked");
   if (!results) return;
-  if (results[0]?.status === "submitted") return watchMetaFabricRun(results[0]);
+  if (results[0]?.status === "submitted") return watchMetaFabricRun(results[0], names ? label : "Run all");
   const decision = results.find((r) => r.status === "needs_decision");
+  logRunActivity(`${names ? label : "Run all"} · ${ENV_LABEL[env]}`, results, "on this PC", env);
   showRunResults(results, decision);
   render();
 }
 
+// One tray entry for a finished batch: how many succeeded, and the results to reopen.
+function logRunActivity(title, results, where, env, id) {
+  const ok = results.filter((r) => r.status === "ok").length;
+  const bad = results.find((r) => r.status === "failed" || r.status === "needs_decision");
+  return logActivity({ id, env, title, status: bad ? "failed" : "ok", results, monitor: true,
+    text: `${ok} of ${results.length} succeeded ${where}.${bad ? ` ${bad.entity}: ${runReason(bad)}` : ""}`, at: new Date().toISOString() });
+}
+
 // A run on Fabric capacity: say it started, then show the results when the runner has saved them.
-async function watchMetaFabricRun(run) {
-  toast(`${ENV_LABEL[run.env]} is running in Fabric. Results show here when it finishes; it is also in Monitor.`);
+async function watchMetaFabricRun(run, label) {
+  const id = `fabric:${run.job_id}`;
+  const title = `${label} · ${ENV_LABEL[run.env]}`;
+  logActivity({ id, env: run.env, request: run.request_id, status: "running", title, text: "In Fabric. You can leave this page; the bell follows it.", monitor: true });
+  toast(`${ENV_LABEL[run.env]} is running in Fabric. The bell follows it until it finishes.`);
   render();
   for (let wait = 10; ; wait = Math.min(wait * 1.5, 60)) {
     await new Promise((r) => setTimeout(r, wait * 1000));
     const res = await attempt(() => rpc("meta_fabric_result", { request_id: run.request_id }));
     if (!res) return;
     if (!["Completed", "Failed", "Cancelled", "Deduped"].includes(res.status)) continue;
+    const here = state.view === "metadata" || state.view === "entity";
     if (res.results) {
-      showRunResults(res.results, res.results.find((r) => r.status === "needs_decision"));
+      logRunActivity(title, res.results, "in Fabric", run.env, id);
+      if (here) showRunResults(res.results, res.results.find((r) => r.status === "needs_decision"));
+      else toast(`${title} finished in Fabric. The bell has the results.`, false);
     } else {
-      showDialog(`The Fabric run ${res.status.toLowerCase()}`, h("div", { class: "scroll" },
+      logActivity({ id, status: "failed", text: res.message || `The run ${res.status.toLowerCase()} before it saved any results.` });
+      if (here) showDialog(`The Fabric run ${res.status.toLowerCase()}`, h("div", { class: "scroll" },
         h("p", { class: "text" }, res.message || "The runner stopped before it saved any results."),
         h("p", { class: "muted-text" }, "Open it from Monitor to see the notebook's output in Fabric.")),
       [btn("Close", null, closeDialog, "tool primary")]);
     }
-    if (state.view === "metadata") render();
+    if (here) render();
     return;
   }
 }
@@ -424,8 +442,8 @@ function showRunResults(results, decision) {
   showDialog(decision ? "One table needs a decision" : `${ok} of ${results.length} succeeded`, body, actions);
 }
 
-async function showRun(runId) {
-  const r = await metaCall("meta_run_detail", { run_id: runId, env: state.meta.env });
+async function showRun(runId, env = state.meta.env) {
+  const r = await metaCall("meta_run_detail", { run_id: runId, env });
   if (!r) return;
   showDialog(`${r.entity} · ${new Date(r.started_at).toLocaleString()}`, h("div", { class: "scroll" },
     h("div", { class: "row wrap" }, statusPill(r.status), h("span", { class: "muted-text" }, `Run ${r.run_id} · metadata ${r.metadata} · ${r.seconds}s`)),
@@ -441,12 +459,14 @@ async function renderRunsTab(body) {
   const runs = await attempt(() => rpc("meta_runs", { env: state.meta.env, limit: 200 })) || [];
   const shown = runs.filter((r) => matches(`${r.entity} ${r.status} ${r.run_id}`));
   body.replaceChildren(shown.length ? h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, ["Started", "Entity", "Status", "Rows read", "Written", "Quarantined", "Seconds", "Metadata", ""].map((c) => h("th", {}, c)))),
+    h("thead", {}, h("tr", {}, ["Status", "Entity", "Ran on", "When", "Rows read", "Written", "Quarantined", "Took", "Metadata"].map((c) => h("th", {}, c)))),
     h("tbody", {}, shown.map((r) => h("tr", { class: "click", onclick: () => showRun(r.run_id) },
-      h("td", {}, new Date(r.started_at).toLocaleString()), h("td", { class: "mono" }, r.entity), h("td", {}, statusPill(r.status)),
+      h("td", {}, statusPill(r.status)),
+      h("td", {}, h("div", { class: "mono" }, r.entity), r.backfill ? h("div", { class: "muted-text small" }, `backfill: ${r.backfill}`) : null,
+        runReason(r) ? h("div", { class: "reason" }, runReason(r)) : null),
+      h("td", {}, String(r.batch_id || "").startsWith("fabric-") ? "Fabric" : "This PC"), h("td", {}, when(r.started_at)),
       h("td", { class: "n" }, r.rows_read), h("td", { class: "n" }, r.rows_written), h("td", { class: "n" }, r.quarantined),
-      h("td", { class: "n" }, r.seconds), h("td", { class: "mono" }, r.metadata),
-      h("td", { class: "muted-text" }, r.backfill ? `backfill: ${r.backfill}` : ""))))) :
+      h("td", { class: "n" }, took(r.seconds)), h("td", { class: "mono" }, r.metadata))))) :
     h("p", { class: "muted-text" }, `No runs in ${ENV_LABEL[state.meta.env]} yet.`));
 }
 
@@ -548,7 +568,7 @@ async function renderEnvTab(body, p) {
           if (!state.user && !(await signIn())) return;
           toast(`Promoting to ${ENV_LABEL[target]}...`);
           const res = await metaCall("meta_promote", { source, target }, "Promote blocked");
-          if (res) { toast(`${ENV_LABEL[target]} is now on metadata ${res.version}`); render(); }
+          if (res) { toast(`${ENV_LABEL[target]} is now on metadata ${res.version}`, false, { log: true }); render(); }
         }, "tool primary small")),
       h("p", { class: "muted-text" }, "Needs the project to pass the save gate, and every table's last run here to be green on this exact metadata version. Lakehouses that don't exist yet are created."),
       box);

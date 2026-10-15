@@ -145,6 +145,9 @@ class HookContext:
 
 
 class Engine:
+    # Batch ids start with this; the Fabric runner uses "fabric-" so the app can tell where a run ran.
+    batch_prefix = "b-"
+
     def __init__(self, project: Project, store: Store, load_date: dt.date | None = None,
                  keys_store: Store | None = None):
         self.project, self.store = project, store
@@ -167,7 +170,7 @@ class Engine:
     def run_many(self, names: list[str] | None = None, backfill: str | None = None) -> list[RunResult]:
         order = run_order(self.project)
         targets = order if names is None else [n for n in order if n in set(names)]
-        batch = "b-" + uuid.uuid4().hex[:8]
+        batch = self.batch_prefix + uuid.uuid4().hex[:8]
         blocked: set[str] = set()
         results = []
         for n in targets:
