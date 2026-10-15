@@ -77,6 +77,20 @@ class Store:
         delta_profile.check_table(dt_)
         return dt_.version()
 
+    def merge_insert(self, lakehouse: str, schema: str, table: str, df: pl.DataFrame, on: list[str]) -> int:
+        """Insert the rows whose ``on`` columns aren't in the table yet, as one Delta MERGE commit."""
+        uri = self.uri(lakehouse, schema, table)
+        try:
+            target = DeltaTable(uri, storage_options=self.options())
+        except TableNotFoundError:
+            return self.write(lakehouse, schema, table, df, mode="overwrite")
+        predicate = " AND ".join(f"t.{c} = s.{c}" for c in on)
+        target.merge(df.to_arrow(), predicate, source_alias="s", target_alias="t") \
+            .when_not_matched_insert_all().execute()
+        dt_ = DeltaTable(uri, storage_options=self.options())
+        delta_profile.check_table(dt_)
+        return dt_.version()
+
     def history(self, lakehouse: str, schema: str, table: str, limit: int = 20) -> list[dict[str, Any]]:
         try:
             return DeltaTable(self.uri(lakehouse, schema, table), storage_options=self.options()).history(limit)

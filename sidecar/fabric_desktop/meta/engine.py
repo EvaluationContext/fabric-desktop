@@ -1,6 +1,6 @@
 """Runs entities: the generic steps every table goes through, with custom code at fixed points.
 
-    read -> contract -> clean -> derive -> hook after_clean -> custom step -> lookups
+    read -> contract -> surrogate keys -> clean -> derive -> hook after_clean -> custom step -> lookups
          -> hook before_write -> output contract -> checks (gate 2) -> write -> log
 
 The engine is the only code that writes a managed table. Custom code receives rows and
@@ -19,6 +19,7 @@ from typing import Any
 
 import polars as pl
 
+from . import keys as keys_mod
 from .project import SYSTEM_COLUMNS, Entity, GateError, Project, impact, load_python, run_order, validate
 from .store import Store
 
@@ -144,8 +145,10 @@ class HookContext:
 
 
 class Engine:
-    def __init__(self, project: Project, store: Store, load_date: dt.date | None = None):
+    def __init__(self, project: Project, store: Store, load_date: dt.date | None = None,
+                 keys_store: Store | None = None):
         self.project, self.store = project, store
+        self.keys_store = keys_store or store  # where LH_Keys lives: the environment's Keys workspace
         self.load_date = load_date or dt.date.today()
         self.run_id = ""
         self._evolved: list[str] = []
@@ -291,7 +294,8 @@ class Engine:
         for d in e.spec.get("derive", []):
             exprs |= set(pl.sql_expr(d["expr"]).meta.root_names())
         new = [c for c in df.columns if c not in expected]
-        needed = own | lookups | exprs | (set(df.columns) if e.spec.get("step") else set())
+        bks = {c for k in keys_mod.entity_keys(e) for c in k["business_key"]}
+        needed = own | lookups | exprs | bks | (set(df.columns) if e.spec.get("step") else set())
         if "entity" in src:
             df = df.select([c for c in df.columns if c in needed or c in new])
         missing = [c for c in e.columns if c not in df.columns and c not in e.derived and c not in e.hook_adds
@@ -310,6 +314,15 @@ class Engine:
             df = df.drop(new)
             detail = f"ignored new columns {', '.join(new)}"
         self._step(res, "contract", t0, df.height, detail)
+        return df
+
+    def _keys(self, e: Entity, df: pl.DataFrame, res: RunResult) -> pl.DataFrame:
+        """Cell 1 of the template: MERGE new business keys into LH_Keys, then key every row."""
+        if not keys_mod.entity_keys(e):
+            return df
+        t0 = time.perf_counter()
+        df, details = keys_mod.assign(self.keys_store, self.project, e, df)
+        self._step(res, "surrogate keys", t0, df.height, "; ".join(details))
         return df
 
     def _clean(self, e: Entity, df: pl.DataFrame, res: RunResult) -> pl.DataFrame:
@@ -418,6 +431,7 @@ class Engine:
         full = backfill == "full"
         df = self._read(e, res, full)
         df = self._contract_in(e, df, res)
+        df = self._keys(e, df, res)
         df = self._clean(e, df, res)
         s = e.spec
         if s.get("derive"):
@@ -596,6 +610,16 @@ def scd1_merge(existing: pl.DataFrame | None, incoming: pl.DataFrame, e: Entity)
     sk, bk = e.surrogate_key, e.keys
     if existing is not None and "valid_from" in existing.columns:
         raise CheckStop(f"{e.name} is a Type 2 table; turning it back into Type 1 would lose history")
+    if sk in incoming.columns:
+        # The rows already carry their key from LH_Keys, so the dimension uses it instead of issuing one.
+        incoming = _ordered(incoming.with_columns(pl.col(sk).cast(pl.Int64)), e)
+        if existing is None:
+            return pl.concat([unknown_member(incoming.schema, e), incoming.filter(pl.col(sk) != -1)]).sort(sk), \
+                f"{incoming.height} new, keys from LH_Keys"
+        matched = incoming.join(existing.select(bk), on=bk, how="semi").height
+        untouched = existing.join(incoming.select(bk), on=bk, how="anti")
+        out = pl.concat([untouched, incoming.filter(pl.col(sk) != -1)], how="diagonal_relaxed")
+        return out.sort(sk), f"{incoming.height - matched} new, {matched} updated, keys from LH_Keys"
     if existing is None:
         rows = _ordered(incoming.with_columns(pl.int_range(1, incoming.height + 1, dtype=pl.Int64).alias(sk)), e)
         return pl.concat([unknown_member(rows.schema, e), rows]), f"{incoming.height} new"
@@ -613,6 +637,8 @@ def scd2_merge(existing: pl.DataFrame | None, incoming: pl.DataFrame, e: Entity,
                load_date: dt.date) -> tuple[pl.DataFrame, str]:
     scd = e.spec["scd"]
     sk, bk, tracked = e.surrogate_key, e.keys, list(scd["tracked"])
+    # Each version gets its own key, so a key that came with the rows (from LH_Keys) is replaced.
+    incoming = incoming.drop(sk, strict=False)
     type1 = [c for c in scd.get("type1", []) if c in incoming.columns]
     first_from = load_date if scd.get("first_version_from") == "load_date" else FAR_PAST
     if existing is not None and "valid_from" not in existing.columns:

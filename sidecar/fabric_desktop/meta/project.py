@@ -1,9 +1,10 @@
 """The metadata project: a folder of config and code that defines every managed table.
 
     layers.toml                  ordered layers and each layer's policy
-    environments.toml            where Dev, Test and Prod write
+    environments.toml            where Dev, Test and Prod write, and each one's Keys workspace
     exceptions.toml              approved rule exceptions (reason, approver, expiry)
     metadata/entities/*.toml     one file per managed table
+    metadata/keys/*.toml         one key table per business key, plus source_systems.toml
     transforms/*.py              custom Python: hooks, custom checks, custom steps
     tests/*.py                   tests that custom code points at
 
@@ -27,14 +28,17 @@ from typing import Any
 
 import polars as pl
 
+from . import keys as keys_mod
+
 MAX_LAYERS = 10
 SYSTEM_COLUMNS = ["_run_id", "_loaded_at"]
 SCD2_COLUMNS = ["valid_from", "valid_to", "is_current", "row_hash"]
 DRIFT_POLICIES = ("evolve", "ignore_new", "strict")
 REQUIRED_CHECKS = ("key_not_null", "key_unique")
 LOAD_MODES = ("full", "incremental", "scd1", "scd2")
-LOGIC_KEYS = ("source", "load", "contract", "clean", "derive", "check", "hooks", "step", "scd", "lookup")
-CUSTOM_RULES = ("owner", "custom_code_owner", "custom_code_test", "key_not_null", "key_unique")
+LOGIC_KEYS = ("source", "load", "contract", "clean", "derive", "check", "hooks", "step", "scd", "lookup", "keys")
+CUSTOM_RULES = ("owner", "custom_code_owner", "custom_code_test", "key_not_null", "key_unique",
+                "surrogate_keys")
 ENVIRONMENTS = ("dev", "test", "prod")
 _LAYER_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 _IGNORED = {".git", ".local", "__pycache__", ".pytest_cache"}
@@ -61,6 +65,7 @@ class Layer:
     required_checks: list[str] = field(default_factory=list)
     reads_from: list[str] = field(default_factory=list)  # empty: any earlier layer
     description: str = ""
+    require_keys: bool = False  # every table in the layer must take surrogate keys from LH_Keys
 
     @property
     def lakehouse(self) -> str:
@@ -68,7 +73,8 @@ class Layer:
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "drift": self.drift, "required_checks": self.required_checks,
-                "reads_from": self.reads_from, "description": self.description, "lakehouse": self.lakehouse}
+                "reads_from": self.reads_from, "description": self.description, "lakehouse": self.lakehouse,
+                "require_keys": self.require_keys}
 
 
 @dataclass
@@ -100,7 +106,14 @@ class Entity:
 
     @property
     def columns(self) -> dict[str, str]:
-        return dict(self.spec.get("contract", {}).get("columns", {}))
+        cols = dict(self.spec.get("contract", {}).get("columns", {}))
+        for k in keys_mod.entity_keys(self):
+            cols.setdefault(k["column"], "int32")
+        return cols
+
+    @property
+    def key_columns(self) -> list[str]:
+        return [k["column"] for k in keys_mod.entity_keys(self)]
 
     @property
     def derived(self) -> list[str]:
@@ -141,7 +154,7 @@ class Entity:
             cols |= set(SCD2_COLUMNS)
         for lk in self.spec.get("lookup", []):
             cols.add(lk["as"])
-        return cols
+        return cols | set(self.key_columns)
 
     def python_refs(self):
         """(kind, "module:function", settings) for every piece of custom code."""
@@ -164,7 +177,7 @@ class Entity:
             "source": src.get("files") or ", ".join(self.sources()) or ("custom step" if s.get("step") else ""),
             "clean": len(s.get("clean", [])), "derive": len(s.get("derive", [])), "checks": len(s.get("check", [])),
             "custom": [kind for kind, _, _ in self.python_refs()],
-            "keys": self.keys, "columns": self.columns, "derived": self.derived, "hook_adds": self.hook_adds,
+            "keys": self.keys, "columns": self.columns, "surrogate_keys": keys_mod.entity_keys(self), "derived": self.derived, "hook_adds": self.hook_adds,
             "reads": self.reads(), "path": str(self.path),
         }
 
@@ -182,6 +195,8 @@ def write_layers_file(root: Path, layers: list[Layer], rules: dict[str, Any]) ->
             lines.append(f"reads_from = {json.dumps(l.reads_from)}")
         if l.description:
             lines.append(f"description = {json.dumps(l.description)}")
+        if l.require_keys:
+            lines.append("require_keys = true")
         lines.append("")
     (Path(root) / "layers.toml").write_text("\n".join(lines), encoding="utf-8")
 
@@ -220,6 +235,9 @@ class Project:
             if exc_file.exists() else []
         env_file = self.root / "environments.toml"
         self.environments = tomllib.loads(env_file.read_text(encoding="utf-8")) if env_file.exists() else {}
+        self.key_tables, self.key_errors = keys_mod.load_key_tables(self.root)
+        self.source_systems, more = keys_mod.load_source_systems(self.root)
+        self.key_errors += more
         for env in ENVIRONMENTS:
             self.environments.setdefault(env, {"target": "local"} if env == "dev" else {"workspace_id": ""})
         self.purge_code()
@@ -312,6 +330,10 @@ class Project:
                                                      key=lambda e: (self._layer_pos(e), e.name))],
             "environments": self.environments,
             "exceptions": self.exceptions,
+            "key_tables": [kt.summary() | {"used_by": [e.name for e in self.entities.values()
+                                                        if kt.name in [k["table"] for k in keys_mod.entity_keys(e)]]}
+                           for kt in sorted(self.key_tables.values(), key=lambda k: k.name)],
+            "source_systems": [s.to_dict() for s in sorted(self.source_systems, key=lambda s: s.id)],
             "errors": errors,
             "run_order": run_order(self) if not any("cycle" in e for e in errors) else [],
         }
@@ -479,6 +501,8 @@ def validate(project: Project, today: dt.date | None = None) -> list[str]:
             test = settings.get("test")
             if not test or not (project.root / test.split("::")[0]).exists():
                 err(e.name, "custom_code_test", f"{kind} {ref} needs a test")
+
+    errors += keys_mod.validate_keys(project, today)
 
     cycle = find_cycle(project)
     if cycle:

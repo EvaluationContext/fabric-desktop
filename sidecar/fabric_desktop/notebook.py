@@ -68,6 +68,8 @@ class Kernel:
         self.count = 0
 
     def run(self, code: str) -> dict[str, Any]:
+        if code.lstrip().startswith("%%sql"):
+            return self._run_sql(code.lstrip()[len("%%sql"):])
         self.count += 1
         out = io.StringIO()
         outputs: list[dict[str, Any]] = []
@@ -89,6 +91,19 @@ class Kernel:
         if out.getvalue():
             outputs.insert(0, {"type": "stream", "text": out.getvalue()})
         return {"status": status, "execution_count": self.count, "outputs": outputs}
+
+    def _run_sql(self, query: str) -> dict[str, Any]:
+        """A %%sql cell: Spark SQL, read on this PC with DuckDB. Writes like MERGE run in Fabric."""
+        self.count += 1
+        if re.search(r"\b(MERGE\s+INTO|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b", query, re.IGNORECASE):
+            text = ("This cell changes tables, so it runs in Fabric once the notebook is published. "
+                    "On this PC, Metadata > Run does the same surrogate key MERGE.\n")
+            return {"status": "ok", "execution_count": self.count, "outputs": [{"type": "stream", "text": text}]}
+        try:
+            from . import sql
+            return {"status": "ok", "execution_count": self.count, "outputs": [display(sql.run(query))]}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "execution_count": self.count, "outputs": [self._error(exc)]}
 
     @staticmethod
     def _error(exc: BaseException) -> dict[str, Any]:
