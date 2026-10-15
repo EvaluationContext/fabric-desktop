@@ -1,0 +1,22 @@
+{
+  "name": "fabric-desktop-codemirror",
+  "private": true,
+  "description": "Builds codemirror.js (the notebook cell editor) from entry.js. The built file is committed, so the app needs no build step.",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --minify --format=iife --global-name=CM --legal-comments=eof --outfile=codemirror.js"
+  },
+  "devDependencies": {
+    "@codemirror/autocomplete": "6.19.1",
+    "@codemirror/commands": "6.9.0",
+    "@codemirror/lang-html": "6.4.12",
+    "@codemirror/lang-markdown": "6.3.4",
+    "@codemirror/lang-python": "6.2.1",
+    "@codemirror/lang-sql": "6.9.1",
+    "@codemirror/language": "6.11.3",
+    "@codemirror/search": "6.5.11",
+    "@codemirror/state": "6.5.2",
+    "@codemirror/view": "6.38.6",
+    "@lezer/highlight": "1.2.1",
+    "esbuild": "0.25.10"
+  }
+}

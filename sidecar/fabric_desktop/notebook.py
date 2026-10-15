@@ -222,7 +222,7 @@ class Kernel:
     # ---- namespace
 
     def _base_namespace(self) -> dict[str, Any]:
-        from . import notebookutils_local, spark_local
+        from . import notebookutils_local
         ns: dict[str, Any] = {"__name__": "__main__", "input": _no_input, "display": self._display}
         utils = notebookutils_local.build(notebookutils_local.Host(
             token=self.token, run_notebook=self.run_notebook, notebook_name=lambda: self.notebook_name))
@@ -237,6 +237,7 @@ class Kernel:
         sys.modules["mssparkutils"] = utils
         ns.update(notebookutils=utils, mssparkutils=utils)
         try:
+            from . import spark_local
             spark_local.install(ns)
         except Exception as exc:  # noqa: BLE001 - plain Python still works without it
             print(f"spark is not available on this PC: {exc}", file=sys.__stderr__)
@@ -323,7 +324,7 @@ class Kernel:
                 status = "ok"
             except KeyboardInterrupt:
                 status = "cancelled"
-                run.add({"type": "text", "text": "Cancelled. Variables from earlier cells are kept."})
+                run.add({"type": "text", "text": "Cancelled. Variables are kept."})
         except KeyboardInterrupt:  # an interrupt that landed while the first one was being handled
             status = "cancelled"
         finally:
