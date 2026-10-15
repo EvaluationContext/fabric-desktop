@@ -51,6 +51,7 @@ function friendlyError(err) {
     [/ConnectionError|Max retries|timed out|Timeout|NameResolution|getaddrinfo|ECONN|network/i, "Couldn't reach Fabric. Check the internet connection and try again."],
     [/Application Control policy|WinError 4551/i, "Windows blocked part of the local engine (Smart App Control or an App Control policy). Restart Fabric Desktop to see which files and what to do."],
     [/CapacityNotActive|capacity.*paused|CapacityLimitExceeded/i, "The workspace's Fabric capacity is paused or full."],
+    [/^The Python sidecar stopped/, "The local engine stopped while doing this. It restarts on your next action; if it keeps stopping, the details below show why."],
   ];
   for (const [re, text] of known) if (re.test(raw)) return { text, details: raw };
   // The sidecar's own errors already explain themselves; only drop the exception name.

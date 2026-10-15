@@ -133,54 +133,78 @@ class CloudMixin:
 
     # ---- notebooks in Fabric
 
-    def _publish(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str]) -> dict[str, Any]:
-        self.notebooks.save(name, cells, lakehouse_ref)  # type: ignore[attr-defined]
-        schemas = self._schemas_enabled(lakehouse_ref["workspace_id"], lakehouse_ref["lakehouse_id"])  # type: ignore[attr-defined]
+    def _publish_workspace(self, name: str, lakehouse_ref: dict[str, str] | None,
+                           workspace: dict[str, str] | None = None) -> dict[str, str]:
+        """Where the notebook is published: the workspace picked for it (passed now or saved with it),
+        else the attached lakehouse's workspace."""
+        if not (workspace and workspace.get("workspace_id")):
+            path = self.notebooks.path(name)  # type: ignore[attr-defined]
+            workspace = self.notebooks.load(name).get("workspace") if path.exists() else None  # type: ignore[attr-defined]
+        if workspace and workspace.get("workspace_id"):
+            return {"workspace_id": workspace["workspace_id"], "workspace_name": workspace.get("workspace_name", "")}
+        if lakehouse_ref and lakehouse_ref.get("workspace_id"):
+            return {"workspace_id": lakehouse_ref["workspace_id"], "workspace_name": lakehouse_ref.get("workspace_name", "")}
+        raise ValueError(f"Pick a workspace to publish {name} to.")
+
+    def _publish(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str] | None,
+                 compute: str | None = None, workspace: dict[str, str] | None = None) -> dict[str, Any]:
+        ws = self._publish_workspace(name, lakehouse_ref, workspace)
+        self.notebooks.save(name, cells, lakehouse_ref, compute, ws)  # type: ignore[attr-defined]
+        schemas = (self._schemas_enabled(lakehouse_ref["workspace_id"], lakehouse_ref["lakehouse_id"])  # type: ignore[attr-defined]
+                   if lakehouse_ref else True)
         ipynb = json.dumps(fabric_ipynb(cells, lakehouse_ref, schemas)).encode()
-        item = self.fabric.save_notebook(lakehouse_ref["workspace_id"], name, ipynb)  # type: ignore[attr-defined]
+        item = self.fabric.save_notebook(ws["workspace_id"], name, ipynb)  # type: ignore[attr-defined]
         if not item.get("id"):  # a create can come back without the item; look it up
-            item = next((n for n in self.fabric.list_notebooks(lakehouse_ref["workspace_id"])  # type: ignore[attr-defined]
+            item = next((n for n in self.fabric.list_notebooks(ws["workspace_id"])  # type: ignore[attr-defined]
                          if n["displayName"] == name), item)
-        return {"name": name, "workspace_id": lakehouse_ref["workspace_id"], "id": item.get("id"),
-                "url": f"{FABRIC_APP}/groups/{lakehouse_ref['workspace_id']}/synapsenotebooks/{item.get('id')}"
+        return {"name": name, "workspace_id": ws["workspace_id"], "workspace_name": ws["workspace_name"],
+                "id": item.get("id"),
+                "url": f"{FABRIC_APP}/groups/{ws['workspace_id']}/synapsenotebooks/{item.get('id')}"
                        "?experience=fabric-developer"}
 
-    def run_notebook_in_fabric(self, name: str, cells: list[dict[str, Any]],
-                               lakehouse_ref: dict[str, str]) -> dict[str, Any]:
-        """Publish the notebook, then run it on the workspace's Fabric capacity."""
-        item = self._publish(name, cells, lakehouse_ref)
+    def run_notebook_in_fabric(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str] | None,
+                               compute: str | None = None, workspace: dict[str, str] | None = None) -> dict[str, Any]:
+        """Publish the notebook, then run it on its workspace's Fabric capacity."""
+        item = self._publish(name, cells, lakehouse_ref, compute, workspace)
         job_id = self.fabric.run_item_job(item["workspace_id"], item["id"], NOTEBOOK_JOB)  # type: ignore[attr-defined]
         return self._log_fabric_run({"kind": "Notebook run", "name": name, "workspace_id": item["workspace_id"],
-                                     "workspace_name": lakehouse_ref.get("workspace_name", ""),
+                                     "workspace_name": item["workspace_name"],
                                      "item_id": item["id"], "job_id": job_id, "url": item["url"]})
 
     def _notebook_item(self, name: str, workspace_id: str) -> dict[str, Any] | None:
         return next((n for n in self.fabric.list_notebooks(workspace_id)  # type: ignore[attr-defined]
                      if n["displayName"] == name), None)
 
-    def notebook_schedules(self, name: str, lakehouse_ref: dict[str, str]) -> dict[str, Any]:
-        item = self._notebook_item(name, lakehouse_ref["workspace_id"])
+    def notebook_schedules(self, name: str, lakehouse_ref: dict[str, str] | None = None,
+                           workspace: dict[str, str] | None = None) -> dict[str, Any]:
+        ws = self._publish_workspace(name, lakehouse_ref, workspace)
+        item = self._notebook_item(name, ws["workspace_id"])
         if item is None:
-            return {"published": False, "schedules": []}
-        schedules = self.fabric.list_schedules(lakehouse_ref["workspace_id"], item["id"], NOTEBOOK_JOB)  # type: ignore[attr-defined]
-        return {"published": True, "item_id": item["id"], "workspace_id": lakehouse_ref["workspace_id"],
+            return {"published": False, "schedules": [], "workspace_id": ws["workspace_id"],
+                    "workspace_name": ws["workspace_name"]}
+        schedules = self.fabric.list_schedules(ws["workspace_id"], item["id"], NOTEBOOK_JOB)  # type: ignore[attr-defined]
+        return {"published": True, "item_id": item["id"], "workspace_id": ws["workspace_id"],
+                "workspace_name": ws["workspace_name"],
                 "schedules": [s | {"text": describe_schedule(s)} for s in schedules]}
 
-    def add_notebook_schedule(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str],
-                              schedule: dict[str, Any]) -> dict[str, Any]:
+    def add_notebook_schedule(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str] | None,
+                              schedule: dict[str, Any], compute: str | None = None,
+                              workspace: dict[str, str] | None = None) -> dict[str, Any]:
         """Publish the notebook (so the schedule runs what is on screen), then add a schedule to it."""
         config = schedule_configuration(schedule.get("kind", "daily"), schedule.get("times"),
                                         schedule.get("every_minutes"), schedule.get("weekdays"),
                                         schedule.get("time_zone") or "UTC")
-        item = self._publish(name, cells, lakehouse_ref)
+        item = self._publish(name, cells, lakehouse_ref, compute, workspace)
         self.fabric.create_schedule(item["workspace_id"], item["id"], NOTEBOOK_JOB, config)  # type: ignore[attr-defined]
         return self.notebook_schedules(name, lakehouse_ref)
 
-    def delete_notebook_schedule(self, name: str, lakehouse_ref: dict[str, str], schedule_id: str) -> dict[str, Any]:
-        item = self._notebook_item(name, lakehouse_ref["workspace_id"])
+    def delete_notebook_schedule(self, name: str, schedule_id: str, lakehouse_ref: dict[str, str] | None = None,
+                                 workspace: dict[str, str] | None = None) -> dict[str, Any]:
+        ws = self._publish_workspace(name, lakehouse_ref, workspace)
+        item = self._notebook_item(name, ws["workspace_id"])
         if item is None:
-            raise LookupError(f"{name} isn't published in {lakehouse_ref.get('workspace_name', 'that workspace')}")
-        self.fabric.delete_schedule(lakehouse_ref["workspace_id"], item["id"], NOTEBOOK_JOB, schedule_id)  # type: ignore[attr-defined]
+            raise LookupError(f"{name} isn't published in {ws['workspace_name'] or 'that workspace'}")
+        self.fabric.delete_schedule(ws["workspace_id"], item["id"], NOTEBOOK_JOB, schedule_id)  # type: ignore[attr-defined]
         return self.notebook_schedules(name, lakehouse_ref)
 
     # ---- table health and maintenance for the metadata project's tables

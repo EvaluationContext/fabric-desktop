@@ -350,10 +350,11 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin):
         nb = self.notebooks.load(name)
         return nb | {"check": compute_check(nb["cells"], nb["lakehouse"])}
 
-    def save_notebook(self, name: str, cells: list[dict[str, Any]],
-                      lakehouse_ref: dict[str, str] | None = None, compute: str | None = None) -> dict[str, Any]:
+    def save_notebook(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str] | None = None,
+                      compute: str | None = None, workspace: dict[str, str] | None = None) -> dict[str, Any]:
         """Save the notebook, and say whether it can run on this PC and in Fabric as it now stands."""
-        return self.notebooks.save(name, cells, lakehouse_ref, compute) | {"check": compute_check(cells, lakehouse_ref)}
+        return (self.notebooks.save(name, cells, lakehouse_ref, compute, workspace)
+                | {"check": compute_check(cells, lakehouse_ref)})
 
     def rename_notebook(self, name: str, new_name: str) -> dict[str, Any]:
         return self.notebooks.rename(name, new_name)
@@ -362,13 +363,14 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin):
         self.notebooks.delete(name)
         return {"deleted": name}
 
-    def publish_notebook(self, name: str, cells: list[dict[str, Any]],
-                         lakehouse_ref: dict[str, str]) -> dict[str, Any]:
-        """Save the notebook, then create or update it as a notebook item in the lakehouse's workspace.
+    def publish_notebook(self, name: str, cells: list[dict[str, Any]], lakehouse_ref: dict[str, str] | None = None,
+                         compute: str | None = None, workspace: dict[str, str] | None = None) -> dict[str, Any]:
+        """Save the notebook, then create or update it as a notebook item in its workspace: the one
+        picked for it (saved with the notebook), else the attached lakehouse's workspace.
 
         A notebook that uses fabric_desktop.lakehouse is published as a Fabric Python notebook
         with a setup cell, so it also runs there (Run in Fabric, schedules)."""
-        return self._publish(name, cells, lakehouse_ref)
+        return self._publish(name, cells, lakehouse_ref, compute, workspace)
 
 
 def _json_value(value: Any) -> Any:

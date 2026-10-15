@@ -96,6 +96,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tool.outline { border-color: var(--border-input); }
 .tool.primary { background: var(--accent); color: #fff; }
 .tool.primary:hover:not(:disabled) { background: var(--accent-dark); }
+/* A primary button with a chevron for its options (Publish to OneLake). */
+.split { display: inline-flex; gap: 1px; }
+.split > .tool.primary:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split > .split-more { border-top-left-radius: 0; border-bottom-left-radius: 0; padding-left: 6px; padding-right: 6px; }
 .tool.link { color: var(--accent); }
 .tool.small { min-height: 26px; padding: 0 6px; }
 .tool .play { color: var(--accent); }
