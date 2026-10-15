@@ -14,6 +14,7 @@ import json
 import re
 import time
 import uuid
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -22,6 +23,9 @@ import polars as pl
 from . import keys as keys_mod
 from .project import SYSTEM_COLUMNS, Entity, GateError, Project, impact, load_python, run_order, validate
 from .store import Store, read_table_uri
+
+# A write that loses a Delta commit race re-reads the table and merges again, this many times.
+WRITE_ATTEMPTS = 3
 
 # Columns the quarantine adds to each held row: why, which run, when, and the row's own id.
 QUARANTINE_COLUMNS = ["_check", "_run_id", "_loaded_at", "_qid"]
@@ -116,6 +120,8 @@ class RunResult:
     delta_version: int | None = None
     message: str = ""
     options: list[str] = field(default_factory=list)
+    # A failure another try may fix (network, throttling, a table busy with another writer).
+    retryable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = self.__dict__ | {"steps": [s.__dict__ for s in self.steps]}
@@ -151,8 +157,15 @@ class Engine:
     batch_prefix = "b-"
 
     def __init__(self, project: Project, store: Store, load_date: dt.date | None = None,
-                 keys_store: Store | None = None, source_options: Callable[[], dict[str, str] | None] | None = None):
+                 keys_store: Store | None = None, source_options: Callable[[], dict[str, str] | None] | None = None,
+                 table_lock: Callable[[Entity], AbstractContextManager[Any]] | None = None,
+                 run_context: dict[str, Any] | None = None):
         self.project, self.store = project, store
+        # Held for the whole of an entity's run, so no other writer (another agent, the app) can
+        # read and overwrite the same table in between. The agent passes one; the app runs without.
+        self.table_lock = table_lock or (lambda entity: nullcontext())
+        # Extra run_log fields: which worker, host and attempt ran it (the agent sets these).
+        self.run_context = dict(run_context or {})
         # Storage options for a source table elsewhere in OneLake ([source] table = "abfss://...").
         self.source_options = source_options or store.options
         self.keys_store = keys_store or store  # where LH_Keys lives: the environment's Keys workspace
@@ -238,18 +251,20 @@ class Engine:
         self._dq: list[dict[str, Any]] = []
         self._schema_changes: list[dict[str, Any]] = []
         try:
-            if backfill == "migrate":
-                self._migrate(e, res)
-            df = self._replayed(e, res) if backfill == "replay" else self._transform(e, res, backfill)
-            df, bad = self._checks(e, df, res)
-            self._write(e, df, res, backfill)
+            with self.table_lock(e):
+                if backfill == "migrate":
+                    self._migrate(e, res)
+                df = self._replayed(e, res) if backfill == "replay" else self._transform(e, res, backfill)
+                df, bad = self._checks(e, df, res)
+                self._write(e, df, res, backfill)
         except DecisionNeeded as ex:
             res.status, res.message, res.options = "needs_decision", str(ex), ex.options
             return res
         except CheckStop as ex:
             res.status, res.message = "failed", str(ex)
         except Exception as ex:  # custom code and source errors are reported, not raised
-            res.status, res.message = "failed", f"{type(ex).__name__}: {ex}"
+            from ..retrying import is_retryable
+            res.status, res.message, res.retryable = "failed", f"{type(ex).__name__}: {ex}", is_retryable(ex)
         seconds = round(time.perf_counter() - started, 3)
         self.store.meta_append("run_log", [{
             "run_id": self.run_id, "batch_id": batch_id, "entity": name, "env": self.store.env,
@@ -257,7 +272,7 @@ class Engine:
             "load_date": self.load_date.isoformat(), "started_at": started_at, "seconds": seconds,
             "rows_read": res.rows_read, "rows_written": res.rows_written, "quarantined": res.quarantined,
             "delta_version": res.delta_version, "backfill": backfill or "", "message": res.message,
-            "steps": json.dumps([s.__dict__ for s in res.steps])}])
+            "steps": json.dumps([s.__dict__ for s in res.steps])} | self.run_context])
         self.store.meta_append("dq_results", self._dq)
         self.store.meta_append("schema_history", self._schema_changes)
         return res
@@ -558,6 +573,18 @@ class Engine:
     # ---- write
 
     def _write(self, e: Entity, df: pl.DataFrame, res: RunResult, backfill: str | None) -> None:
+        from deltalake.exceptions import CommitFailedError
+
+        for attempt in range(1, WRITE_ATTEMPTS + 1):
+            try:
+                return self._write_once(e, df, res, backfill)
+            except CommitFailedError:
+                # Another writer committed first: merge again against the table as it is now.
+                if attempt == WRITE_ATTEMPTS:
+                    raise
+                time.sleep(0.5 * attempt)
+
+    def _write_once(self, e: Entity, df: pl.DataFrame, res: RunResult, backfill: str | None) -> None:
         t0 = time.perf_counter()
         existing = self.read_entity(e.name)
         if existing is not None and df.height == 0 and (e.mode in ("incremental", "scd1", "scd2") or backfill == "replay"):

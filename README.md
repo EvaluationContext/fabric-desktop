@@ -2,15 +2,29 @@
 
 Do your Microsoft Fabric data engineering on your own Windows PC: notebooks, Spark SQL queries, jobs and a metadata-driven medallion framework. Results are written straight into OneLake as Delta tables, so no Fabric capacity is spent on the transform work.
 
+![Fabric Desktop in a Microsoft Fabric solution: develop locally, execute on your infrastructure, store and consume in Microsoft Fabric](docs/fabric-desktop-solution.png)
+
+**Develop with Fabric Desktop. Execute on your infrastructure. Store and consume in Microsoft Fabric.** The picture above is where the product is headed. Today the desktop app and a single-node [headless agent](docs/agent.md) are built; multiple workers, resource governance and pipeline hand-off are later milestones in the [enterprise roadmap](docs/enterprise-roadmap.md).
+
 ![Fabric Desktop architecture](docs/architecture.svg)
 
 - **Local compute:** notebooks run in a Python kernel on the PC, SQL runs in DuckDB, and Python transforms run in Polars.
 - **Direct to OneLake:** delta-rs writes each table straight to the lakehouse. It commits the Delta log only after the data files are written, so Fabric never sees a half-written version.
 - **Fabric-safe tables:** every table is checked against a conservative Delta profile (reader 1, writer 2, classic checkpoints, no deletion vectors or column mapping). This keeps tables readable by the SQL analytics endpoint and Direct Lake.
-- **Signs in as you:** the app uses delegated MSAL sign-in, with no service principal. Your token cache lives in `%LOCALAPPDATA%\FabricDesktop`.
+- **Signs in as you:** the app uses delegated MSAL sign-in. Your token cache lives in `%LOCALAPPDATA%\FabricDesktop`.
+- **Headless agent for servers:** the same engine runs unattended on Windows or Linux servers as a service principal or managed identity, with a durable job queue, retries, crash recovery and per-table write leases. See [docs/agent.md](docs/agent.md).
 - **Fabric's own pages inside the app:** the Monitoring hub and the OneLake catalog are embedded, and their sign-in is kept between launches.
 
 How the pieces fit together, how a request flows and how writes reach OneLake: see [docs/architecture.md](docs/architecture.md).
+
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | How the app, the sidecar and OneLake fit together |
+| [docs/agent.md](docs/agent.md) | The headless agent: identity setup, `agent.toml`, installing on Linux (systemd or container) and Windows, operating it, and what to verify on your tenant |
+| [docs/enterprise-roadmap.md](docs/enterprise-roadmap.md) | The enterprise local execution assessment: feature inventory, gap analysis, architecture changes, roadmap milestones M0 to M6 and work items |
+| [deploy/agent.example.toml](deploy/agent.example.toml) | Every agent setting, with comments |
 
 ## Layout
 
@@ -18,7 +32,8 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 | --- | --- |
 | `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake I/O, notebook kernel, SQL engine, metadata framework, job runner and the JSON-lines server |
 | `app/` | Tauri 2 shell (`src-tauri/`) and the Fabric-style UI (`ui/`, plain HTML and JavaScript). The shell starts the sidecar and forwards UI actions to it |
-| `docs/` | Architecture overview and diagram, and the KratosBI logo files (`docs/brand/`) |
+| `docs/` | Architecture overview and diagram, agent guide, enterprise roadmap, and the KratosBI logo files (`docs/brand/`) |
+| `deploy/` | Headless agent packaging: example `agent.toml`, systemd unit and Dockerfile (`linux/`), and the Windows install script (`windows/`) |
 | `examples/` | Sample jobs (`sales_by_region.toml` for DuckDB, `top_products.toml` for Polars) and sample data |
 
 ## One-time setup: Entra app registration
@@ -237,6 +252,20 @@ mode = "overwrite"           # or "append"
 
 Relative paths in a job resolve from the job file's folder.
 
+## Headless agent
+
+Run your metadata project on a server with no one signed in. On Windows or Linux:
+
+```bash
+pip install ./sidecar
+fabric-desktop agent --config agent.toml check            # validate the config and the sign-in
+fabric-desktop agent --config agent.toml run              # the service: schedules, queue, retries
+fabric-desktop agent --config agent.toml enqueue prod     # run Prod now
+fabric-desktop agent --config agent.toml status
+```
+
+Setup, every setting, and install steps for systemd, Docker and Windows are in [docs/agent.md](docs/agent.md). The plan it belongs to is in [docs/enterprise-roadmap.md](docs/enterprise-roadmap.md). It has not yet run against a live Fabric tenant.
+
 ## Not yet built
 
-An installer, and pipelines. From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.
+An installer, and pipelines (the agent's pipeline hand-off is roadmap M4). From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.
