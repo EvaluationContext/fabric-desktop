@@ -81,7 +81,7 @@ def test_fabric_paths_resolve_to_the_attached_lakehouse(tmp_path):
 
 def test_notebookutils_fs_runtime_and_exit(tmp_path):
     k = Kernel()
-    folder = tmp_path / "out"
+    folder = (tmp_path / "out").as_posix()  # forward slashes: the path goes inside a Python string
     out = k.run(
         f"notebookutils.fs.mkdirs('file:{folder}')\n"
         f"notebookutils.fs.put('file:{folder}/a.txt', 'hello', True)\n"
