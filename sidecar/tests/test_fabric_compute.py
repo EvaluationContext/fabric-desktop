@@ -190,3 +190,40 @@ def test_run_in_fabric_uploads_once_starts_the_runner_and_reads_results(svc, tmp
 
     sched = svc.meta_add_schedule("dev", {"kind": "daily", "times": ["05:00"]})
     assert sched["compute"] == "fabric" and sched["schedules"][0]["text"].startswith("Daily at 05:00")
+
+
+def test_fabric_runs_are_marked_in_the_run_log(tmp_path):
+    proj = tmp_path / "proj"
+    init_project(proj, "3", "Chris", True)
+    bundle = write_bundle(bundle_files(proj, {"env": "dev"}), tmp_path / "bundle")
+    stores = (LocalStore(proj / ".local" / "dev", "dev"), LocalStore(proj / ".local" / "keys-dev", "dev"))
+    run_bundle(bundle, entities="bronze.orders", stores=stores, results_dir=tmp_path / "r")
+    log = stores[0].meta("run_log")
+    assert log["batch_id"][-1].startswith("fabric-")
+
+
+def test_runs_from_every_environment(svc, tmp_path, monkeypatch):
+    svc.meta_run()  # Dev, on this PC
+    out = svc.meta_runs_all()
+    assert {r["env"] for r in out["runs"]} == {"dev"} and all(r["compute"] == "local" for r in out["runs"])
+    assert out["unavailable"] == {}  # Test and Prod have no workspace yet: left out quietly
+
+    # Test in OneLake: read only when already signed in, never by asking for a sign-in.
+    svc.meta_set_environment("test", "ws-test", "Sales - Test")
+    project = svc._project()
+    store = FolderOneLake(tmp_path / "onelake", "test", [l.lakehouse for l in project.layers] + ["LH_Meta"])
+    store.meta_append("run_log", [{"run_id": "r1", "batch_id": "fabric-1", "entity": "silver.orders", "env": "test",
+                                   "status": "failed", "started_at": "2099-01-01T00:00:00+00:00", "message": "check failed"}])
+    orig = type(svc)._store
+    monkeypatch.setattr(svc, "_store", lambda p, env, create=False: store if env == "test" else orig(svc, p, env, create))
+    svc._auth = types.SimpleNamespace(storage_token=lambda: "tok", silent_token=lambda scopes: None)
+    assert svc.meta_runs_all()["unavailable"] == {"test": "Sign in to see its runs"}
+    svc._auth = types.SimpleNamespace(storage_token=lambda: "tok", silent_token=lambda scopes: "tok")
+    out = svc.meta_runs_all()
+    first = out["runs"][0]
+    assert (first["env"], first["entity"], first["compute"], first["status"]) == ("test", "silver.orders", "fabric", "failed")
+
+
+def test_runs_from_every_environment_without_a_project(tmp_path):
+    s = CloudService(root=tmp_path / "app")
+    assert s.meta_runs_all() == {"runs": [], "unavailable": {}}

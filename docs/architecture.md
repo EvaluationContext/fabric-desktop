@@ -12,7 +12,7 @@ Fabric Desktop does Microsoft Fabric data engineering work on your own Windows P
 
 | Part | What it does | Code |
 | --- | --- | --- |
-| **App UI** | The Fabric-style pages: Home, Create, Workspaces, OneLake catalog, Fabric, notebooks, SQL query, Metadata and Monitor. Plain HTML and JavaScript with no build step. Each data action is one `rpc` command to the shell. | `app/ui/` |
+| **App UI** | The Fabric-style pages: Home, Create, Workspaces, OneLake catalog, Fabric, notebooks, SQL query, Metadata and Monitor. Plain HTML and JavaScript with no build step. `activity.js` holds the environment picker, the activity tray and plain-language errors. Each data action is one `rpc` command to the shell. | `app/ui/` |
 | **Fabric view** | A second WebView2 laid over the page, showing Fabric's own portal from `app.fabric.microsoft.com`: full page on the **Fabric** page, where item links across the app open, and the Monitoring hub on **Monitor**. It has its own WebView2 profile that uses Windows single sign-on. Its sign-in cookies are saved every few seconds, encrypted with Windows DPAPI, and restored before the next launch's first page load. Links that leave Fabric open in the default browser. | `fabric_view_show`, `mod signin` in `app/src-tauri/src/main.rs` |
 | **Startup check** | Before the engine starts: if GitHub Releases has a newer build, it downloads it, checks the file is that build, swaps the exe and restarts. It then checks Python 3.11 or later, and installs the sidecar from the commit the exe was built from, so the exe and the engine always match. | `check_components`, `app/src-tauri/src/updater.py` |
 

@@ -63,6 +63,10 @@ cd app\src-tauri
 cargo run
 ```
 
+### Knowing what's running
+
+The top bar holds the **Environment** picker (Dev, Test or Prod), which every page uses, and a pill that says where that environment runs, such as "Runs in Fabric · Sales - Test". Click the pill to change it. **Home** starts with what needs attention (tables whose last run failed, in any environment), then what is running, the next scheduled runs, and each environment's state. The **bell** opens the activity tray: it follows runs in Fabric until they end, even if you leave the page, keeps results you can reopen, and keeps every error with its technical details folded underneath. Errors are explained in a sentence ("Your sign-in expired", "You don't have permission for that in this workspace"); the raw text is under **Details**. **Monitor** lists runs from every environment (Test and Prod once you are signed in), filtered by environment and by where they ran, with failures first and their reason in the row. The Fabric Monitoring hub below it can be hidden.
+
 ## Notebooks
 
 The app looks and works like the Fabric service: the same left rail (Home, Create, Workspaces, OneLake, Metadata, Monitor), and Python notebooks with a ribbon, an Explorer pane and **Add data items** to attach a lakehouse. Cells run in a Python kernel on this PC, so no Fabric capacity is used.

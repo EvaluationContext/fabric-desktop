@@ -146,6 +146,7 @@ def run_bundle(bundle: str | Path, entities: str = "", backfill: str = "", casca
     names = [n.strip() for n in entities.split(",") if n.strip()] or None
     started = dt.datetime.now(dt.timezone.utc)
     engine = Engine(project, store, keys_store=keys_store)
+    engine.batch_prefix = "fabric-"
     if cascade and names and len(names) == 1:
         results: list[RunResult] = engine.backfill(names[0])
     else:

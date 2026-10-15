@@ -52,9 +52,16 @@ function hydrateIcons(root = document) {
   });
 }
 
-function toast(text, isError = false) {
+// A short message at the bottom of the window. Errors, and messages marked log, also go to the
+// activity tray, which keeps them; quiet ones (the tray already has them) don't.
+function toast(text, isError = false, opts = {}) {
   const t = document.getElementById("toast");
-  t.textContent = text;
+  t.textContent = opts.details ? `${text}\nDetails are in Activity (the bell).` : text;
+  if ((isError || opts.log) && !opts.quiet) {
+    const title = opts.title || (isError ? "Something didn't work" : text);
+    const body = title === text ? "" : opts.title && text.startsWith(`${opts.title}: `) ? text.slice(opts.title.length + 2) : text;
+    logActivity({ status: isError ? "error" : "ok", title, text: body, details: opts.details || "" });
+  }
   // On Monitor the bottom of the window is Fabric's native view, which would cover the toast.
   t.className = `toast${isError ? " error" : ""}${state.view === "monitor" ? " top" : ""}`;
   t.hidden = false;
@@ -66,7 +73,8 @@ async function attempt(fn, label) {
   try {
     return await fn();
   } catch (err) {
-    toast(label ? `${label}: ${err}` : String(err), true);
+    const f = friendlyError(err);
+    toast(label ? `${label}: ${f.text}` : f.text, true, { title: label, details: f.details });
     return undefined;
   }
 }
@@ -165,6 +173,8 @@ function go(view) {
 }
 
 function renderChrome() {
+  renderEnvBar();
+  renderBell();
   const account = document.getElementById("account");
   account.textContent = state.user ? state.user[0].toUpperCase() : "?";
   account.classList.toggle("signed-out", !state.user);
@@ -237,26 +247,110 @@ function signInCallout() {
 
 // ---------- Home, Create, Monitor ----------
 
+// Home answers "what happened since I was last here": problems first, then what is running, what
+// runs next and each environment's state, then ways to start something.
 async function renderHome() {
+  const name = state.user ? state.user.split("@")[0] : "";
+  const summary = h("p", { class: "sub" }, "Checking what ran...");
+  const attention = h("div", { class: "home-attention" });
+  const running = h("div", { class: "muted-text" }, "Loading...");
+  const upcoming = h("div", { class: "muted-text" }, "Loading...");
+  const envCards = h("div", { class: "home-envs" });
   const list = h("div", { class: "muted-text" }, "Loading notebooks...");
-  setView(h("div", { class: "page" },
-    h("h1", {}, state.user ? `Welcome, ${state.user.split("@")[0]}` : "Welcome to Fabric Desktop"),
-    h("p", { class: "sub" }, "Work like you do in Fabric, with the compute on this PC. Results go straight to OneLake."),
+  setView(h("div", { class: "page home" },
+    h("h1", {}, name ? `Welcome back, ${name}` : "Welcome to Fabric Desktop"),
+    summary,
     signInCallout(),
-    h("div", { class: "tiles" },
-      tile("notebook", "New notebook", "Python on this PC, attached to a lakehouse", newNotebook),
-      tile("lakehouse", "New lakehouse", "A schema-enabled lakehouse in a workspace", () => newLakehouse()),
-      tile("onelake", "OneLake catalog", "Find any item across your workspaces", () => go("onelake"))),
-    h("h2", {}, "Recent notebooks"), list));
-  const notebooks = (await attempt(() => rpc("list_notebooks"))) || [];
+    attention,
+    h("div", { class: "home-two" },
+      h("section", { class: "card pad" }, h("h2", {}, "Running now"), running),
+      h("section", { class: "card pad" }, h("h2", {}, "Coming up"), upcoming)),
+    h("section", {}, h("h2", {}, "Environments"), envCards),
+    h("section", { class: "row wrap home-start" }, h("h2", {}, "Start something"),
+      btn("New notebook", "notebook", newNotebook, "tool outline"),
+      btn("New lakehouse", "lakehouse", () => newLakehouse(), "tool outline"),
+      btn("OneLake catalog", "onelake", () => go("onelake"), "tool outline")),
+    h("section", {}, h("h2", {}, "Recent notebooks"), list)));
+
+  const [meta, cloud, project, notebooks] = await Promise.all([
+    rpc("meta_runs_all", { limit: 300 }).catch(() => ({ runs: [], unavailable: {} })),
+    rpc("fabric_runs", { limit: 50, refresh: false }).catch(() => []),
+    rpc("meta_project").catch(() => null),
+    attempt(() => rpc("list_notebooks")),
+  ]);
   if (state.view !== "home") return;
-  const shown = notebooks.filter((n) => matches(n.name));
+  if (project) state.meta.project = project;
+  const hasProject = !!project?.path;
+
+  // The latest run of each table in each environment says how that table stands now.
+  const latest = new Map();
+  for (const r of meta.runs || []) {
+    const key = `${r.env}:${r.entity}`;
+    if (!latest.has(key)) latest.set(key, r);
+  }
+  const failing = [...latest.values()].filter((r) => r.status === "failed" || r.status === "needs_decision");
+  const cloudFailed = (cloud || []).filter((r) => r.status === "Failed" && Date.now() - new Date(r.started_at) < 86400000);
+  const live = activity.items.filter((i) => i.status === "running" && !i.stale);
+
+  const problems = failing.length + cloudFailed.length;
+  summary.textContent = [
+    problems ? `${problems} ${problems === 1 ? "thing needs" : "things need"} your attention` : "Nothing needs your attention",
+    live.length ? `${live.length} running` : "",
+  ].filter(Boolean).join(" · ") + ".";
+
+  attention.replaceChildren(problems ? [h("h2", {}, "Needs your attention"),
+    ...failing.slice(0, 5).map((r) => h("div", { class: "card attention" },
+      statusPill(r.status),
+      h("div", { class: "grow" },
+        h("div", {}, h("b", { class: "mono" }, r.entity), ` in ${ENV_LABEL[r.env]} · ${r.compute === "fabric" ? "in Fabric" : "on this PC"}`),
+        h("div", { class: "reason" }, runReason(r) || "Did not finish"),
+        h("div", { class: "muted-text small" }, when(r.started_at))),
+      btn("Open entity", null, () => { setGlobalEnv(r.env); openEntity(r.entity); }, "tool outline"),
+      btn("Open run", null, () => showRun(r.run_id, r.env), "tool primary"))),
+    ...cloudFailed.slice(0, 3).map((r) => h("div", { class: "card attention" },
+      statusPill("failed"),
+      h("div", { class: "grow" }, h("div", {}, h("b", {}, r.name), ` · ${r.kind} in Fabric`),
+        h("div", { class: "reason" }, r.message || "Failed in Fabric"), h("div", { class: "muted-text small" }, when(r.started_at))),
+      r.url ? btn("Open in Fabric", null, () => openInFabric(r.url), "tool primary") : null))] : []);
+
+  running.replaceWith(live.length ? h("div", { class: "home-list" }, live.map((i) => h("div", { class: "home-item" },
+    h("div", { class: "row" }, h("b", { class: "grow" }, i.title), h("span", { class: "muted-text small" }, `started ${relTime(i.at)}`)),
+    h("div", { class: "progress" }, h("div", { class: "bar indeterminate" })),
+    i.text ? h("div", { class: "muted-text small" }, i.text) : null)))
+    : h("p", { class: "muted-text" }, "Nothing is running."));
+
+  envCards.replaceChildren(...Object.entries(ENV_LABEL).map(([env, label]) => {
+    const where = envWhere(project, env);
+    const runs = [...latest.values()].filter((r) => r.env === env);
+    const failed = runs.filter((r) => r.status === "failed" || r.status === "needs_decision").length;
+    const last = (meta.runs || []).find((r) => r.env === env);
+    const busy = live.some((i) => i.env === env);
+    const [cls, text] = busy ? ["info", "Running"] : meta.unavailable?.[env] ? ["neu", "Not checked"]
+      : !runs.length ? ["neu", "Never run"] : failed ? ["fail", `${failed} failed`] : ["pass", "All green"];
+    return h("button", { class: "card env-tile", onclick: () => { setGlobalEnv(env); goMeta("runs"); } },
+      h("div", { class: "row" }, h("b", { class: "grow" }, label), h("span", { class: `pill-s ${cls}` }, text)),
+      h("div", { class: "muted-text small" }, hasProject ? where.short : "No metadata project yet"),
+      h("div", { class: "muted-text small" }, meta.unavailable?.[env] || (last ? ["Last run ", when(last.started_at)] : "")));
+  }));
+
+  // Schedules live in Fabric, so they are read only when signed in, after the rest is on screen.
+  const fabricEnvs = hasProject && state.user ? Object.keys(ENV_LABEL).filter((env) => envWhere(project, env).fabric) : [];
+  const lists = await Promise.all(fabricEnvs.map((env) => rpc("meta_schedules", { env }).catch(() => null)));
+  if (state.view !== "home") return;
+  const items = lists.flatMap((res, i) => (res?.schedules || []).filter((sc) => sc.enabled)
+    .map((sc) => ({ what: `Run all · ${ENV_LABEL[fabricEnvs[i]]}`, text: sc.text })));
+  upcoming.replaceWith(items.length ? h("div", { class: "home-list" }, items.map((x) => h("div", { class: "home-item row" },
+    h("span", { class: "grow" }, x.what), h("span", { class: "muted-text small" }, x.text))))
+    : h("p", { class: "muted-text" }, !state.user ? "Sign in to see schedules in Fabric."
+      : fabricEnvs.length ? "No schedules yet. Add one with Schedule on the Metadata page."
+        : "Schedules run in Fabric. Set an environment to run in Fabric (Metadata > Environments) to add one."));
+
+  const shown = (notebooks || []).filter((n) => matches(n.name)).slice(0, 8);
   list.replaceWith(shown.length ? h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, "Modified"))),
+    h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Modified"))),
     h("tbody", {}, shown.map((n) => h("tr", { class: "click", onclick: () => openNotebook(n.name) },
       h("td", {}, h("span", { class: "item" }, icon("notebook", 18), n.name)),
-      h("td", {}, "Notebook"),
-      h("td", {}, new Date(n.modified * 1000).toLocaleString()))))) : h("p", { class: "muted-text" },
+      h("td", {}, when(new Date(n.modified * 1000).toISOString())))))) : h("p", { class: "muted-text" },
     state.query ? "No notebooks match your search." : "No notebooks yet. Create one to get started."));
 }
 
@@ -274,63 +368,96 @@ function renderCreate() {
       tile("lakehouse", "Lakehouse", "Store tables and files in OneLake, organized by schema", () => newLakehouse()))));
 }
 
+// Filters on Monitor, kept for the session; showFabric is remembered on this PC.
+const monitorPage = { env: "all", where: "any", problemsFirst: true, showFabric: true };
+try { monitorPage.showFabric = localStorage.getItem("fd.monitor.fabric") !== "hidden"; } catch { /* default: shown */ }
+
 async function renderMonitor() {
   const local = h("div", { class: "muted-text monitor-empty" }, "Loading runs...");
   const slot = h("div", { class: "fabric-slot" },
     h("p", { class: "muted-text" }, "Opening the Fabric Monitoring hub. Sign in once and the app remembers it."));
   const action = (name) => attempt(() => invoke("fabric_view_action", { action: name, page: "monitor" }), "Fabric view");
-  setView(h("div", { class: "page monitor" },
+  const chip = (key, value, label) => h("button", { class: `chip${monitorPage[key] === value ? " on" : ""}`,
+    onclick: () => { monitorPage[key] = value; render(); } }, label);
+  const toggleFabric = () => {
+    monitorPage.showFabric = !monitorPage.showFabric;
+    try { localStorage.setItem("fd.monitor.fabric", monitorPage.showFabric ? "shown" : "hidden"); } catch { /* session only */ }
+    render();
+  };
+  const note = h("div", { class: "muted-text small" });
+  setView(h("div", { class: `page monitor${monitorPage.showFabric ? "" : " no-fabric"}` },
     h("section", { class: "card monitor-local" },
       h("div", { class: "monitor-band" },
         h("h2", {}, "From Fabric Desktop"),
-        h("span", { class: "muted-text" }, "Metadata runs (Dev), notebook writes, and jobs this app started in Fabric, newest first"),
+        h("span", { class: "muted-text" }, "Everything this app ran or started, in every environment, on this PC and in Fabric"),
         h("span", { class: "spacer" }),
         btn("Refresh", "sync", () => render(), "tool outline")),
+      h("div", { class: "monitor-filters" },
+        h("div", { class: "row", role: "group", "aria-label": "Environment" },
+          chip("env", "all", "All"), Object.entries(ENV_LABEL).map(([id, label]) => chip("env", id, label))),
+        h("div", { class: "row", role: "group", "aria-label": "Where it ran" },
+          chip("where", "any", "Anywhere"), chip("where", "local", "This PC"), chip("where", "fabric", "Fabric")),
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: monitorPage.problemsFirst ? true : null,
+          onchange: (e) => { monitorPage.problemsFirst = e.target.checked; render(); } }), "Problems first"),
+        note),
       local),
     h("section", { class: "card monitor-fabric" },
       h("div", { class: "monitor-band" },
         h("h2", {}, "In Fabric"),
-        h("span", { class: "muted-text" }, "Fabric's own Monitoring hub"),
+        h("span", { class: "muted-text" }, "Fabric's own Monitoring hub, for everything else in your workspaces"),
         h("span", { class: "spacer" }),
-        btn("Back", null, () => action("back"), "tool outline"),
-        btn("Home", "home", () => action("home"), "tool outline"),
-        btn("Reload", "restart", () => action("reload"), "tool outline"),
-        btn("Open in browser", "publish", () => action("browser"), "tool outline")),
-      slot)));
-  dockFabricView(slot, "monitor", "monitor");
+        monitorPage.showFabric ? [
+          btn("Back", null, () => action("back"), "tool outline"),
+          btn("Home", "home", () => action("home"), "tool outline"),
+          btn("Reload", "restart", () => action("reload"), "tool outline"),
+          btn("Open in browser", "publish", () => action("browser"), "tool outline")] : null,
+        btn(monitorPage.showFabric ? "Hide" : "Show", null, toggleFabric, "tool outline")),
+      monitorPage.showFabric ? slot : null)));
+  if (monitorPage.showFabric) dockFabricView(slot, "monitor", "monitor");
+  else invoke("fabric_view_hide").catch(() => {});
 
-  const [writes, runs, cloud] = await Promise.all([
+  const [writes, meta, cloud] = await Promise.all([
     attempt(() => rpc("history")),
-    rpc("meta_runs", { env: "dev" }).catch(() => []),  // no metadata project yet
+    rpc("meta_runs_all", { limit: 200 }).catch(() => ({ runs: [], unavailable: {} })),
     rpc("fabric_runs", { limit: 50 }).catch(() => []),  // not signed in yet
   ]);
   if (state.view !== "monitor") return;
+  const unavailable = Object.entries(meta.unavailable || {});
+  note.textContent = unavailable.map(([env, why]) => `${ENV_LABEL[env]}: ${why}`).join(" · ");
   const rows = [
-    ...(runs || []).map((r) => ({
-      at: r.started_at, status: r.status, activity: r.entity, kind: "Metadata run", env: r.env,
-      seconds: r.seconds, rows: r.rows_written,
-      detail: r.quarantined ? `${r.quarantined} quarantined` : (r.status === "ok" ? "" : r.message || ""),
-      open: () => showRun(r.run_id),
+    ...(meta.runs || []).map((r) => ({
+      at: r.started_at, status: r.status, activity: r.entity, kind: `Metadata run${r.backfill ? ` · backfill ${r.backfill}` : ""}`,
+      env: r.env, where: r.compute || "local", seconds: r.seconds, rows: r.rows_written,
+      note: r.quarantined ? `${r.quarantined} quarantined` : "", reason: runReason(r),
+      open: () => showRun(r.run_id, r.env),
     })),
     ...(cloud || []).map((r) => ({
-      at: r.started_at, status: fabricStatus(r.status), activity: r.name, kind: `${r.kind} in Fabric`, env: r.env || "",
-      seconds: r.finished_at ? Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000) : "", rows: "",
-      detail: r.message || r.workspace_name || "",
+      at: r.started_at, status: fabricStatus(r.status), activity: r.name, kind: r.kind, env: r.env || "", where: "fabric",
+      seconds: r.finished_at ? (new Date(r.finished_at) - new Date(r.started_at)) / 1000 : "", rows: "",
+      note: r.workspace_name || "", reason: r.status === "Failed" ? r.message || "" : "",
       open: r.url ? () => openInFabric(r.url) : null,
     })),
     ...(writes || []).map((r) => ({
-      at: r.finished_at, status: "ok", activity: r.job, kind: "Notebook write", env: "",
-      seconds: r.seconds, rows: r.rows, detail: `${r.table_uri.split("/Tables/")[1] || r.table_uri} (${r.mode}, v${r.delta_version})`,
+      at: r.finished_at, status: "ok", activity: r.job, kind: "Notebook write", env: "", where: "local",
+      seconds: r.seconds, rows: r.rows, note: `${r.table_uri.split("/Tables/")[1] || r.table_uri} (${r.mode}, v${r.delta_version})`, reason: "",
     })),
-  ].filter((r) => matches(`${r.activity} ${r.kind} ${r.detail}`))
+  ].filter((r) => (monitorPage.env === "all" || r.env === monitorPage.env)
+      && (monitorPage.where === "any" || r.where === monitorPage.where)
+      && matches(`${r.activity} ${r.kind} ${r.note} ${r.reason}`))
     .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const bad = (r) => (r.status === "failed" || r.status === "needs_decision" ? 0 : r.status === "running" ? 1 : 2);
+  if (monitorPage.problemsFirst) rows.sort((a, b) => bad(a) - bad(b));  // stable: newest first within each group
   local.replaceWith(rows.length ? h("div", { class: "monitor-scroll" }, h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, ["Status", "Activity", "Kind", "Env", "When", "Seconds", "Rows", "Details"].map((c) => h("th", {}, c)))),
+    h("thead", {}, h("tr", {}, ["Status", "Activity", "Env", "Ran on", "When", "Took", "Rows", ""].map((c) => h("th", {}, c)))),
     h("tbody", {}, rows.map((r) => h("tr", r.open ? { class: "click", onclick: r.open } : {},
-      h("td", {}, statusPill(r.status)), h("td", {}, r.activity), h("td", {}, r.kind), h("td", {}, r.env),
-      h("td", {}, new Date(r.at).toLocaleString()), h("td", {}, r.seconds), h("td", {}, r.rows ?? ""),
-      h("td", { class: "muted-text" }, r.detail)))))) :
-    h("p", { class: "muted-text monitor-empty" }, "Nothing has run on this PC yet. Run a metadata entity or write a table from a notebook."));
+      h("td", {}, statusPill(r.status)),
+      h("td", {}, h("div", {}, h("b", {}, r.activity)), h("div", { class: "muted-text small" }, [r.kind, r.note].filter(Boolean).join(" · ")),
+        r.reason ? h("div", { class: "reason" }, r.reason) : null),
+      h("td", {}, ENV_LABEL[r.env] || r.env), h("td", {}, r.where === "fabric" ? "Fabric" : "This PC"),
+      h("td", {}, when(r.at)), h("td", { class: "n" }, took(r.seconds)), h("td", { class: "n" }, r.rows ?? ""),
+      h("td", { class: "n" }, r.open ? h("span", { class: "link-text" }, "Details") : null)))))) :
+    h("p", { class: "muted-text monitor-empty" }, monitorPage.env !== "all" || monitorPage.where !== "any"
+      ? "Nothing matches these filters." : "Nothing has run yet. Run a metadata entity or write a table from a notebook."));
 }
 
 // Fabric job states, shown with the same pills as local runs.
@@ -357,7 +484,7 @@ function placeFabricView() {
   cancelAnimationFrame(fabricView.frame);
   fabricView.frame = requestAnimationFrame(() => {
     const slot = fabricView.slot;
-    const covered = document.getElementById("dialog-root").childElementCount > 0;
+    const covered = document.getElementById("dialog-root").childElementCount > 0 || activity.open;
     if (state.view !== fabricView.owner || !slot?.isConnected || covered) {
       invoke("fabric_view_hide").catch(() => {});
       return;
@@ -1242,7 +1369,9 @@ async function runInFabric() {
   nb.fabricRun = run;
   renderChrome();
   if (state.view === "notebook") renderNotebook();
-  toast(`${nb.name} is running in Fabric. Follow it in Monitor.`);
+  toast(`${nb.name} is running in Fabric. The bell follows it until it finishes.`);
+  logActivity({ id: `fabric:${run.job_id}`, status: "running", title: `${nb.name} · Notebook run`, text: `In Fabric on ${nb.lakehouse.workspace_name}`, url: run.url, monitor: true });
+  trackFabricJobs();
   watchFabricRun(nb, run);
 }
 
@@ -1254,11 +1383,7 @@ async function watchFabricRun(nb, run) {
     if (!now) continue;
     nb.fabricRun = now;
     if (state.view === "notebook" && state.notebook === nb) renderNotebook();
-    if (FABRIC_DONE.has(now.status)) {
-      toast(now.status === "Completed" ? `${nb.name} finished in Fabric.` : `${nb.name} ${now.status.toLowerCase()} in Fabric. ${now.message || ""}`,
-        now.status !== "Completed");
-      return;
-    }
+    if (FABRIC_DONE.has(now.status)) return;  // the activity tray reports how it ended
   }
 }
 
@@ -1925,6 +2050,8 @@ function markdown(src) {
 document.querySelectorAll("#rail .rail-item[data-view]").forEach((el) => {
   el.addEventListener("click", () => go(el.dataset.view));
 });
+document.getElementById("bell").addEventListener("click", () => toggleTray());
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && activity.open && !document.getElementById("dialog-root").childElementCount) toggleTray(false); });
 document.getElementById("account").addEventListener("click", (e) => {
   if (!state.user) { signIn().then((ok) => ok && render()); return; }
   showMenu(e.currentTarget, [{ info: `Signed in as ${state.user}` }, { info: `Fabric Desktop build ${state.build || "unknown"}` }]);
@@ -2052,6 +2179,9 @@ checkComponents().finally(() => {
     state.python = env.python;
     state.user = env.user;
     state.tenant = env.tenant;
+    // The environment pill needs the metadata project; there may not be one yet.
+    state.meta.project = await rpc("meta_project").catch(() => state.meta.project);
     render();
+    trackFabricJobs();
   }, "Could not start the Python sidecar");
 });
