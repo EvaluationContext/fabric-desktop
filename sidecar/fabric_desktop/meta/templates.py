@@ -48,7 +48,7 @@ through the same steps, checks it, and writes it to its layer's lakehouse.
 | `transforms/` | Your Python: hooks, custom checks and custom steps. Shared helpers go in `common.py`. |
 | `tests/` | Tests for your Python. Every hook and custom step must point at one. |
 | `exceptions.toml` | Approved exceptions to a rule, each with a reason, an approver and an expiry. |
-| `environments.toml` | Where Dev, Test and Prod write. Dev writes to this PC by default. |
+| `environments.toml` | Each environment's Fabric workspace, and whether it runs on this PC or Fabric. Dev starts offline on this PC. |
 | `.local/` | Dev's local lakehouses. Not committed. |
 
 Where custom logic goes, simplest first:
@@ -317,8 +317,9 @@ def init_project(root: Path, preset: str = "3", owner: str = "", sample: bool = 
     _write(root, "README.md", README)
     _write(root, ".gitignore", ".local/\n__pycache__/\n.pytest_cache/\n")
     _write(root, "environments.toml", textwrap.dedent("""\
-        # Dev runs on this PC. Test and Prod write to a Fabric workspace each, with one
-        # lakehouse per layer (LH_<Layer>) created the first time you promote.
+        # Each environment gets its own Fabric workspace, with one lakehouse per layer
+        # (LH_<Layer>). Runs happen on this PC or on Fabric, per environment (compute).
+        # Dev starts offline (target = "local", the .local folder) until you assign a workspace.
         [dev]
         target = "local"
 

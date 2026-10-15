@@ -720,4 +720,4 @@ def test_service_round_trip(tmp_path):
     call("meta_set_keys_workspace", env="test", workspace_id="ws-keys", workspace_name="Keys - Test")
     assert all(r["status"] == "ok" for r in call("meta_run")["result"])
     assert call("meta_promote_check", source="dev", target="test")["result"]["errors"] == []
-    assert "Pick a Fabric workspace for Test" in call("meta_promote", source="dev", target="test")["error"]
+    assert "Assign a workspace to Test" in call("meta_promote", source="dev", target="test")["error"]

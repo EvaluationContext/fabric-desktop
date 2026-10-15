@@ -1,3 +1,5 @@
+import pytest
+
 from fabric_desktop.fabric_api import FabricClient
 
 
@@ -82,3 +84,14 @@ def test_scan_endorsements_reads_every_item_list():
     assert c.scan_endorsements(["ws1"]) == {"lh1": "Certified", "r1": "Promoted"}
     assert s.calls[0] == ("POST", "https://api.powerbi.com/v1.0/myorg/admin/workspaces/getInfo", {"workspaces": ["ws1"]})
     assert s.calls[-1][1].endswith("/workspaces/scanResult/scan1")
+
+
+def test_create_workspace_puts_it_on_a_capacity_and_explains_a_taken_name():
+    c, s = client([Resp(201, {"id": "ws9", "displayName": "Sales - Dev"})])
+    assert c.create_workspace("Sales - Dev", "cap1", "Dev")["id"] == "ws9"
+    assert s.calls[0] == ("POST", "https://api.fabric.microsoft.com/v1/workspaces",
+                          {"displayName": "Sales - Dev", "capacityId": "cap1", "description": "Dev"})
+    c, s = client([Resp(409, {"errorCode": "WorkspaceNameAlreadyExists"})])
+    with pytest.raises(Exception, match="already exists. Pick it from the list"):
+        c.create_workspace("Sales - Dev")
+    assert s.calls[0][2] == {"displayName": "Sales - Dev"}

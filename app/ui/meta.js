@@ -550,13 +550,28 @@ async function renderEnvTab(body, p) {
   const card = (env) => {
     const cfg = envs[env] || {};
     const local = (cfg.target || (env === "dev" ? "local" : "onelake")) === "local";
-    const where = local ? "This PC (.local folder in the project)" : cfg.workspace_name || cfg.workspace_id || "No workspace yet";
+    const wsName = cfg.workspace_name || cfg.workspace_id;
+    const lakehouses = p.layers.map((l) => l.lakehouse).concat("LH_Meta").join(" · ");
+    const onWorkspace = !local && !!cfg.workspace_id;
+    const where = local
+      ? (wsName ? `Offline: tables stay in the project's .local folder. Switch Tables in back to Workspace to use ${wsName}.` : "Tables stay in the project's .local folder on this PC until you assign a workspace.")
+      : !wsName ? `Assign a workspace before ${ENV_LABEL[env]} can run. You can still run it on this PC.`
+        : cfg.compute === "fabric" ? `Fabric runs it on ${wsName}'s capacity and writes its lakehouses.`
+          : `This PC runs it, reading and writing ${wsName}'s lakehouses in OneLake.`;
     return h("div", { class: "card pad env-card" },
       h("div", { class: "row" }, h("b", {}, ENV_LABEL[env]), h("span", { class: "spacer" }),
-        btn("Change", null, () => pickEnvTarget(env), "tool link small")),
-      h("div", { class: "muted-text" }, where),
-      h("div", { class: "muted-text small" }, p.layers.map((l) => l.lakehouse).concat("LH_Meta").join(" · ")),
-      computeChoice(env, local, cfg.compute === "fabric"));
+        btn(wsName ? "Change" : "Assign workspace", null, () => pickEnvWorkspace(env, p), "tool link small")),
+      h("div", { class: "env-ws" }, icon("workspace", 16),
+        wsName ? h("b", { title: cfg.workspace_id || null }, wsName) : h("span", { class: "muted-text" }, "No workspace yet")),
+      h("div", { class: "muted-text small" }, lakehouses),
+      h("div", { class: "compute-row" }, h("span", { class: "muted-text small" }, "Tables in"),
+        h("div", { class: "seg" },
+          h("button", { class: onWorkspace ? "on" : null, disabled: !cfg.workspace_id ? true : null,
+            title: !cfg.workspace_id ? `Assign a workspace to ${ENV_LABEL[env]} first.` : null,
+            onclick: !onWorkspace && cfg.workspace_id ? () => setEnv(env, { target: "onelake" }) : null }, "Workspace"),
+          h("button", { class: local ? "on" : null, onclick: local ? null : () => setEnv(env, { target: "local" }) }, "This PC only"))),
+      computeChoice(env, local, cfg.compute === "fabric"),
+      h("p", { class: "muted-text small" }, where));
   };
   const promoteRow = (source, target) => {
     const box = h("div", { class: "muted-text" }, "Checking the promote gate...");
@@ -585,7 +600,7 @@ async function renderEnvTab(body, p) {
 function computeChoice(env, local, fabric) {
   const option = (value, label, on) => h("button", {
     class: on ? "on" : null, disabled: value === "fabric" && local ? true : null,
-    title: value === "fabric" && local ? `${ENV_LABEL[env]} keeps its tables on this PC. Point it at a workspace first.` : null,
+    title: value === "fabric" && local ? `${ENV_LABEL[env]} keeps its tables on this PC only. Switch Tables in to Workspace first.` : null,
     onclick: on ? null : () => setCompute(env, value),
   }, label);
   return h("div", { class: "compute-row" }, h("span", { class: "muted-text small" }, "Runs on"),
@@ -631,22 +646,69 @@ async function scheduleMetaRuns(env) {
   if (res) show(res);
 }
 
-async function pickEnvTarget(env) {
-  const options = [];
-  if (env === "dev") options.push(h("button", { class: "choice", onclick: () => setEnv(env, { target: "local" }) },
-    icon("desktop", 20), h("span", { class: "main" }, h("span", { class: "n" }, "This PC"), h("span", { class: "w" }, "Delta tables in the project's .local folder"))));
-  const list = h("div", { class: "scroll" }, options, h("p", { class: "muted-text" }, state.user ? "Loading workspaces..." : "Sign in to pick a Fabric workspace."));
-  showDialog(`Where ${ENV_LABEL[env]} writes`, list, [btn("Cancel", null, closeDialog, "tool outline")]);
+// Every environment has a workspace, whether this PC or Fabric runs it: pick one, or create one.
+async function pickEnvWorkspace(env, p) {
+  const current = p.environments?.[env]?.workspace_id;
+  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, state.user ? "Loading workspaces..." : "Sign in to pick a Fabric workspace."));
+  showDialog(`Workspace for ${ENV_LABEL[env]}`, list, [btn("Cancel", null, closeDialog, "tool outline")]);
   if (!state.user && !(await signIn())) return;
   const workspaces = await loadWorkspaces();
-  list.replaceChildren(...options, ...workspaces.map((w) => h("button", { class: "choice", onclick: () => setEnv(env, { target: "onelake", workspace_id: w.id, workspace_name: w.displayName }) },
-    icon("workspace", 20), h("span", { class: "main" }, h("span", { class: "n" }, w.displayName), h("span", { class: "w" }, "One lakehouse per layer in this workspace")))));
+  const taken = Object.fromEntries(["dev", "test", "prod"].filter((e) => e !== env && p.environments?.[e]?.workspace_id)
+    .map((e) => [p.environments[e].workspace_id, ENV_LABEL[e]]));
+  list.replaceChildren(
+    h("p", { class: "muted-text" }, `${ENV_LABEL[env]}'s lakehouses (one per layer, plus LH_Meta) live in this workspace, whether this PC or Fabric runs it.`),
+    h("button", { class: "choice", onclick: () => createEnvWorkspace(env, p) }, icon("add", 20),
+      h("span", { class: "main" }, h("span", { class: "n" }, "Create a new workspace"), h("span", { class: "w" }, "Made with your Fabric sign-in, on a capacity you pick"))),
+    ...workspaces.map((w) => h("button", { class: `choice${w.id === current ? " selected" : ""}`,
+      onclick: () => setEnv(env, { workspace_id: w.id, workspace_name: w.displayName }) },
+    icon("workspace", 20), h("span", { class: "main" }, h("span", { class: "n" }, w.displayName),
+      h("span", { class: "w" }, taken[w.id] ? `Also used by ${taken[w.id]}` : "One lakehouse per layer in this workspace")),
+    w.id === current ? h("span", { class: "tag" }, "Current") : null)));
+}
+
+function suggestedWorkspaceName(env, p) {
+  const parts = (p.path || "").split(/[\\/]/).filter(Boolean);
+  let base = parts.pop() || "Fabric Desktop";
+  if (base.toLowerCase() === "metadata" && parts.length) base = parts.pop();
+  return `${base} - ${ENV_LABEL[env]}`;
+}
+
+async function createEnvWorkspace(env, p) {
+  const name = h("input", { value: suggestedWorkspaceName(env, p) });
+  const capacity = h("select", {}, h("option", { value: "" }, "Loading capacities..."));
+  const note = h("p", { class: "muted-text small" }, "Lakehouses need a Fabric capacity, so pick an active one.");
+  const create = async () => {
+    if (!name.value.trim()) { name.focus(); return; }
+    toast(`Creating ${name.value.trim()}...`);
+    const res = await metaCall("meta_create_workspace", { env, name: name.value.trim(), capacity_id: capacity.value }, "Workspace not created");
+    if (!res) return;
+    closeDialog();
+    state.workspaces = null;  // the new one shows up in every picker
+    state.meta.project = res;
+    toast(`Created ${res.created.displayName} and assigned it to ${ENV_LABEL[env]}. Its lakehouses are created on the first ${env === "dev" ? "run" : "promote"}.`, false, { log: true });
+    render();
+  };
+  showDialog(`New workspace for ${ENV_LABEL[env]}`, h("div", {},
+    h("label", { class: "field" }, "Name", name),
+    h("label", { class: "field" }, "Capacity", capacity), note),
+  [btn("Back", null, () => pickEnvWorkspace(env, p), "tool outline"), btn("Create workspace", "add", create, "tool primary")]);
+  name.select();
+  const caps = (await attempt(() => rpc("list_capacities"), "Could not list capacities")) || [];
+  capacity.replaceChildren(...caps.map((c) => h("option", { value: c.id },
+    `${c.displayName}${c.sku ? ` (${c.sku})` : ""}${c.state && c.state !== "Active" ? ` - ${c.state.toLowerCase()}` : ""}`)),
+  h("option", { value: "" }, "No capacity (assign one in Fabric later)"));
+  if (!caps.length) note.textContent = "No Fabric capacity found for your account. The workspace is created without one; assign a capacity in Fabric before its lakehouses can be made.";
 }
 
 async function setEnv(env, cfg) {
   closeDialog();
   const res = await metaCall("meta_set_environment", { env, ...cfg });
-  if (res) { state.meta.project = res; render(); }
+  if (!res) return;
+  state.meta.project = res;
+  if (cfg.workspace_name) toast(`${ENV_LABEL[env]} now uses ${cfg.workspace_name}.`);
+  else if (cfg.target === "local") toast(`${ENV_LABEL[env]} now keeps its tables on this PC only.`);
+  else if (cfg.target === "onelake") toast(`${ENV_LABEL[env]} now reads and writes its workspace's lakehouses.`);
+  render();
 }
 
 // ---------- surrogate keys ----------
