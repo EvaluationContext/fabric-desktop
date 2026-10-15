@@ -45,13 +45,13 @@ fabric-desktop run ..\examples\sales_by_region.toml   # set workspace_id in the 
 
 ### Desktop app
 
-Download [fabric-desktop.exe](https://github.com/KratosDataGod/fabric-desktop/releases/download/latest/fabric-desktop.exe) from the **Releases** section of the repository page and double-click it. Every green build of `main` replaces it with a fresh copy. Windows SmartScreen may warn because the exe is not signed yet; choose **More info > Run anyway**. The app runs the sidecar with the `python` on your PATH (Python 3.11 or later). To use a different interpreter, set `FABRIC_DESKTOP_PYTHON` to its full path.
+Download [fabric-desktop.exe](https://github.com/KratosDataGod/fabric-desktop/releases/download/latest/fabric-desktop.exe) from the **Releases** section of the repository page and double-click it. Every green build of `main` replaces it with a fresh copy. Windows SmartScreen may warn while the exe is not signed; choose **More info > Run anyway**. The app brings its own engine (Python plus the sidecar and its packages) in `%LOCALAPPDATA%\FabricDesktop\engine`, so the PC needs no Python. To run the sidecar with a Python of your own instead, set `FABRIC_DESKTOP_PYTHON` to its full path and pip-install the sidecar there.
 
 Each time it starts, the app checks its components before anything else runs:
 
 - **Fabric Desktop:** if a newer build has been released, it downloads it straight away, checks the file really is that build, replaces the exe in place and restarts. The account menu shows which build is running.
-- **Python:** it must be 3.11 or later.
-- **Local engine (the sidecar):** the app installs the sidecar from the same commit the exe was built from, with pip, so the two always match. A missing or older sidecar is installed or updated automatically, with pip's output shown while it runs. An editable (`pip install -e`) install is left alone.
+- **Local engine:** the engine built from the same commit as the exe, so the two always match. A missing or older engine is downloaded from the release (`fabric-desktop-engine.zip`) and unpacked automatically. With `FABRIC_DESKTOP_PYTHON` set, the sidecar is pip-installed into that Python instead (it must be 3.11 or later), and an editable (`pip install -e`) install is left alone.
+- **Blocked by Windows:** if Smart App Control or an organization's App Control policy refuses the engine's DLLs, the check names the blocked packages and says what to do instead of reinstalling.
 
 Exes you build yourself skip the update check and leave the sidecar as you installed it.
 
@@ -62,6 +62,21 @@ $env:FABRIC_DESKTOP_PYTHON = (Get-Command python).Source   # the Python that has
 cd app\src-tauri
 cargo run
 ```
+
+### Code signing
+
+Smart App Control (and most App Control policies) only lets signed code load, and the Python packages the engine uses (pyarrow, Polars, DuckDB and others) are not signed by their makers. CI signs them, and the exe, with [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/) when the repository has these settings (**Settings > Secrets and variables > Actions**):
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `AZURE_TENANT_ID` | Tenant of the app registration below |
+| Secret | `AZURE_CLIENT_ID` | An app registration with the **Trusted Signing Certificate Profile Signer** role on the signing account |
+| Secret | `AZURE_CLIENT_SECRET` | A client secret of that app registration |
+| Variable | `TRUSTED_SIGNING_ENDPOINT` | The account's region endpoint, such as `https://eus.codesigning.azure.net/` |
+| Variable | `TRUSTED_SIGNING_ACCOUNT` | The Trusted Signing account name |
+| Variable | `TRUSTED_SIGNING_PROFILE` | The certificate profile name |
+
+Without them, builds are unsigned and the signing steps are skipped.
 
 ### Knowing what's running
 
@@ -195,4 +210,4 @@ Relative paths in a job resolve from the job file's folder.
 
 ## Not yet built
 
-A bundled Python runtime and installer, and pipelines. From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.
+An installer, and pipelines. From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.

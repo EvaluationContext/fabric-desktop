@@ -301,6 +301,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .startup-row[data-status="warn"] .startup-mark { background: #c27c0e; }
 .startup-row[data-status="error"] .startup-mark { background: var(--danger); }
 .startup-row[data-status="error"] .startup-detail { color: var(--danger); }
+.startup-help { margin-top: 14px; font-size: 13px; line-height: 1.5; }
+.startup-help p { margin: 0 0 8px; }
 .startup-row[data-status="busy"] .startup-mark { background: none; border: 2px solid var(--accent); border-top-color: transparent; animation: spin 0.8s linear infinite; }
 .startup-log { max-height: 180px; overflow-y: auto; margin: 0; padding: 8px; border-radius: 4px; background: var(--canvas); font: 11px/1.4 var(--mono); white-space: pre-wrap; }
 @keyframes spin { to { transform: rotate(360deg); } }

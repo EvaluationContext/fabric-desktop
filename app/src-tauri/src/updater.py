@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 REPO = "KratosDataGod/fabric-desktop"
 RELEASE = f"https://github.com/{REPO}/releases/download/latest"
@@ -43,6 +44,10 @@ def installed_sidecar() -> dict:
         match = COMMIT.search(direct.get("url", ""))
         commit = match.group(1) if match else None
     editable = bool((direct.get("dir_info") or {}).get("editable"))
+    # The bundled engine is installed from a wheel CI built, and says its build here.
+    engine = Path(sys.executable).with_name("engine.json")
+    if engine.is_file():
+        commit = json.loads(engine.read_text()).get("commit") or commit
     return {"version": dist.version, "commit": commit, "editable": editable}
 
 
@@ -54,6 +59,86 @@ def load_error() -> str | None:
         return None
     lines = [line for line in proc.stderr.splitlines() if line.strip()]
     return lines[-1] if lines else f"exited with code {proc.returncode}"
+
+
+# Windows refuses to load a DLL that Smart App Control or an organization's App Control
+# (WDAC) policy does not trust: ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION, or for an
+# unverifiable signature ERROR_INVALID_IMAGE_HASH. Python only shows the message text,
+# which is translated, so the files are probed one by one for these codes instead.
+BLOCKED_CODES = {4551, 577}
+DONT_RESOLVE_DLL_REFERENCES = 0x1  # map the image (which runs the policy check) without running its code
+
+
+def _sidecar_packages() -> list:
+    """The installed sidecar and everything it depends on, as importlib distributions."""
+    from importlib import metadata
+
+    seen, todo, dists = set(), ["fabric-desktop"], []
+    while todo:
+        name = re.split(r"[\s;\[<>=!~(]", todo.pop(), maxsplit=1)[0].lower().replace("_", "-")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            dist = metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            continue
+        dists.append(dist)
+        todo += [r for r in dist.requires or [] if "extra ==" not in r]
+    return dists
+
+
+def _load_blocked(path: str) -> bool:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LoadLibraryExW.restype = ctypes.c_void_p
+    kernel32.LoadLibraryExW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.FreeLibrary.argtypes = [ctypes.c_void_p]
+    handle = kernel32.LoadLibraryExW(path, None, DONT_RESOLVE_DLL_REFERENCES)
+    if handle:
+        kernel32.FreeLibrary(handle)
+        return False
+    return ctypes.get_last_error() in BLOCKED_CODES
+
+
+def smart_app_control() -> str | None:
+    """"on", "evaluation" or "off" for Smart App Control; None where Windows has no such setting."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\CI\Policy") as key:
+            state = winreg.QueryValueEx(key, "VerifiedAndReputablePolicyState")[0]
+    except (ImportError, OSError):
+        return None
+    return {0: "off", 1: "on", 2: "evaluation"}.get(state)
+
+
+def blocked_files(probe=_load_blocked) -> dict | None:
+    """The sidecar's DLLs that Windows' application control refuses to load, by package.
+
+    None when nothing is blocked (or not on Windows). Every package is checked, so one
+    answer names all of them rather than only the first import that fails.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        return _blocked_files(probe)
+    except Exception:  # a diagnosis only: never let it break the startup check
+        return None
+
+
+def _blocked_files(probe) -> dict | None:
+    dists, packages = _sidecar_packages(), {}
+    for dist in dists:
+        for file in dist.files or []:
+            if file.suffix.lower() in (".pyd", ".dll") and probe(str(dist.locate_file(file))):
+                packages.setdefault(dist.metadata["Name"], []).append(str(file))
+    if not packages:
+        return None
+    sac = smart_app_control()
+    return {"packages": packages, "by": "smart_app_control" if sac == "on" else "policy",
+            "smart_app_control": sac, "location": str(dists[0].locate_file(""))}
 
 
 def _get(url: str, timeout: int = 10):
@@ -90,6 +175,7 @@ def check() -> dict:
     sidecar = installed_sidecar()
     if sidecar["version"]:
         sidecar["error"] = load_error()
+        sidecar["blocked"] = blocked_files() if sidecar["error"] else None
     return {
         "python": ".".join(map(str, sys.version_info[:3])),
         "python_ok": sys.version_info >= MIN_PYTHON,
@@ -102,16 +188,25 @@ def install_sidecar(commit: str) -> int:
     url = sidecar_url(commit)
     pip = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off"]
     # The first install brings in any new dependencies. The second replaces the
-    # package itself even when its version string has not changed.
-    for args in ([url], ["--force-reinstall", "--no-deps", url]):
+    # package itself even when its version string has not changed; it is quiet,
+    # because it would print the same collecting and building lines again.
+    steps = [("Installing the engine's packages", [url]),
+             (f"Installing engine build {commit[:7]}", ["--quiet", "--force-reinstall", "--no-deps", url])]
+    for title, args in steps:
+        print(f"== {title}", flush=True)
         code = subprocess.call(pip + args, stdout=sys.stdout, stderr=subprocess.STDOUT,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if code:
             return code
     error = load_error()
     if error:
+        blocked = blocked_files()
+        if blocked:
+            # The shell shows this as an explanation rather than as pip output.
+            print("blocked " + json.dumps(blocked), flush=True)
         print(f"The local engine installed but does not start: {error}", flush=True)
         return 1
+    print("The local engine starts.", flush=True)
     return 0
 
 

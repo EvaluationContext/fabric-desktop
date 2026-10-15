@@ -2079,9 +2079,33 @@ window.addEventListener("beforeunload", () => { if (state.notebook?.dirty) saveN
 
 // ---------- startup component check ----------
 
+// What to do when Windows' application control refuses the engine's DLLs (from the
+// startup check's "blocked" report: files by package, who blocked them, where they are).
+function blockedHelp(blocked) {
+  const names = Object.entries(blocked.packages)
+    .map(([pkg, files]) => `${pkg} (${files.length} file${files.length === 1 ? "" : "s"})`).join(", ");
+  const why = "Nothing is wrong with the install, so reinstalling won't fix it.";
+  if (blocked.by === "smart_app_control") {
+    return [
+      h("p", {}, "Smart App Control stops program files that aren't signed or that Microsoft doesn't recognize yet. " +
+        `It stopped files the local engine needs: ${names}. ${why}`),
+      h("p", {}, "Smart App Control can't allow just one app. To run the engine on this PC, turn it off in " +
+        "Windows Security > App & browser control > Smart App Control settings, then click Retry. " +
+        "Some versions of Windows can't turn it back on without a reset, so decide that first."),
+    ];
+  }
+  return [
+    h("p", {}, "An App Control policy on this PC, usually set by your organization, stops program files it doesn't trust. " +
+      `It stopped files the local engine needs: ${names}. ${why}`),
+    h("p", {}, `Ask your IT admin to allow the Python packages in ${blocked.location}. ` +
+      "They can see each block in Event Viewer under Microsoft > Windows > CodeIntegrity > Operational. Then click Retry."),
+  ];
+}
+
 // Before the sidecar starts, make sure this exe, Python and the sidecar are
-// current and match each other, updating whatever is behind.
-async function checkComponents() {
+// current and match each other, updating whatever is behind. Release builds run a
+// bundled engine; after installing one, the check runs once more (afterInstall) with it.
+async function checkComponents(afterInstall = false) {
   const short = (commit) => commit.slice(0, 7);
   const rows = {};
   const row = (key, label) => (rows[key] = h("div", { class: "startup-row", "data-status": "busy" },
@@ -2092,6 +2116,7 @@ async function checkComponents() {
     rows[key].lastChild.textContent = detail;
   };
   const log = h("pre", { class: "startup-log", hidden: true });
+  const help = h("div", { class: "startup-help", hidden: true });
   const actions = h("div", { class: "dialog-actions" });
   const choose = (...labels) => new Promise((resolve) => actions.replaceChildren(...labels.map((label, i) =>
     btn(label, null, () => { actions.replaceChildren(); resolve(i); }, i === 0 ? "tool primary" : "tool outline"))));
@@ -2101,7 +2126,7 @@ async function checkComponents() {
     h("div", { class: "dialog", role: "dialog", "aria-label": "Checking components" },
       h("div", { class: "dialog-head" }, "Checking components"),
       h("div", { class: "startup-rows" }, row("app", "Fabric Desktop"), row("python", "Python"), row("sidecar", "Local engine")),
-      log, actions)));
+      help, log, actions)));
 
   let report;
   try {
@@ -2115,11 +2140,16 @@ async function checkComponents() {
   }
   const { app, sidecar, latest } = report;
 
-  set("python", report.python_ok ? "ok" : "error",
-    report.python_ok ? report.python : `${report.python} is too old. Fabric Desktop needs Python 3.11 or later.`);
+  if (report.bundled) {
+    set("python", report.python ? "ok" : "skip", report.python ? `${report.python}, part of the engine` : "Comes with the engine");
+  } else {
+    set("python", report.python_ok ? "ok" : "error",
+      report.python_ok ? report.python : `${report.python} is too old. Fabric Desktop needs Python 3.11 or later.`);
+  }
 
   state.build = app.commit ? short(app.commit) : `${app.version} (local build)`;
   if (!app.commit) set("app", "ok", `${app.version}, local build (update check off)`);
+  else if (report.bundled && !report.python) set("app", "ok", `Build ${short(app.commit)}; checked for updates once the engine is installed`);
   else if (app.updated_to && app.updated_to !== app.commit) {
     set("app", "error", `The update didn't take: this is still build ${short(app.commit)}, not ${short(app.updated_to)}. ` +
       "Download fabric-desktop.exe again from the latest release.");
@@ -2143,6 +2173,16 @@ async function checkComponents() {
     }
   }
 
+  // Windows refusing to load the engine's DLLs is not something pip can repair, so
+  // explain it in place of the pip output.
+  const showBlocked = (blocked) => {
+    set("sidecar", "error", blocked.by === "smart_app_control"
+      ? "Windows Smart App Control blocked it." : "An App Control policy on this PC blocked it.");
+    log.hidden = true;
+    help.replaceChildren(...blockedHelp(blocked));
+    help.hidden = false;
+  };
+
   if (!report.python_ok) set("sidecar", "skip", "Needs Python 3.11 or later");
   else if (sidecar.editable || !app.commit) {
     const kind = sidecar.editable ? "developer install (not managed)" : "not checked in a local build";
@@ -2151,21 +2191,43 @@ async function checkComponents() {
     else set("sidecar", "error", "Not installed. In the sidecar folder, run: python -m pip install -e .");
   } else if (sidecar.commit === app.commit && !sidecar.error) {
     set("sidecar", "ok", `${sidecar.version}, matches this build`);
+  } else if (sidecar.commit === app.commit && sidecar.blocked) {
+    showBlocked(sidecar.blocked);
   } else {
+    if (afterInstall && report.bundled) {
+      // The engine just installed is still not this build's: the exe update above failed.
+      set("sidecar", "error", `The latest engine is build ${sidecar.commit ? short(sidecar.commit) : "unknown"}, ` +
+        `but this app is ${short(app.commit)}. Restart Fabric Desktop to update it.`);
+      if (await choose("Retry", "Continue anyway") === 0) return checkComponents();
+      return closeDialog();
+    }
     set("sidecar", "busy", sidecar.commit === app.commit ? `Repairing (it would not start: ${sidecar.error})…`
+      : report.bundled ? (sidecar.version ? "Updating the engine…" : "Installing the engine…")
       : sidecar.version ? `Updating to build ${short(app.commit)}…` : `Installing build ${short(app.commit)}…`);
     log.hidden = false;
+    let blocked = null;
     const unlisten = await listen((line) => {
+      if (line.startsWith("blocked {")) { blocked = JSON.parse(line.slice(8)); return; }
       log.textContent += `${line}\n`;
       log.scrollTop = log.scrollHeight;
     });
     try {
-      await invoke("update_sidecar");
+      const result = await invoke("update_sidecar");
+      if (result?.engine) {
+        // Check again with the new engine: it may be a newer build than this exe, and
+        // it may be blocked from loading.
+        return checkComponents(true);
+      }
       set("sidecar", "ok", `Updated to build ${short(app.commit)}`);
       log.hidden = true;
     } catch (err) {
-      set("sidecar", "error", "Update failed. The pip output is below.");
-      log.textContent += `${err}\n`;
+      if (blocked) showBlocked(blocked);
+      else set("sidecar", "error", report.bundled ? "The engine could not be installed. Details are below."
+        : "Update failed. The pip output is below.");
+      // The error repeats the last lines of output, which the log already shows.
+      const shown = new Set(log.textContent.split("\n"));
+      const extra = String(err).split("\n").filter((l) => !shown.has(l) && !l.startsWith("blocked {"));
+      if (extra.length) log.textContent += `${extra.join("\n")}\n`;
     } finally {
       unlisten();
     }

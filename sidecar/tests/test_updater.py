@@ -150,5 +150,68 @@ def test_check_reports_python(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["python_ok"] is True
     assert report["latest"]["commit"] == SHA
-    assert set(report["sidecar"]) == {"version", "commit", "editable", "error"}
+    assert set(report["sidecar"]) == {"version", "commit", "editable", "error", "blocked"}
     assert report["sidecar"]["error"] is None
+
+
+class FakeFile(str):
+    @property
+    def suffix(self):
+        return Path(self).suffix
+
+
+class FakeBinaryDist:
+    def __init__(self, name, files):
+        self.metadata = {"Name": name}
+        self.files = [FakeFile(f) for f in files]
+
+    def locate_file(self, file):
+        return Path("C:/Users/chris/site-packages") / file
+
+
+def test_blocked_files_names_every_blocked_package(monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "smart_app_control", lambda: "on")
+    monkeypatch.setattr(updater, "_sidecar_packages", lambda: [
+        FakeBinaryDist("fabric-desktop", ["fabric_desktop/server.py"]),
+        FakeBinaryDist("pyarrow", ["pyarrow/lib.cp314-win_amd64.pyd", "pyarrow/arrow.dll", "pyarrow/__init__.py"]),
+        FakeBinaryDist("duckdb", ["_duckdb.cp314-win_amd64.pyd"]),
+    ])
+    blocked = updater.blocked_files(probe=lambda path: "pyarrow" in path)
+    assert blocked["packages"] == {"pyarrow": ["pyarrow/lib.cp314-win_amd64.pyd", "pyarrow/arrow.dll"]}
+    assert blocked["by"] == "smart_app_control"
+
+
+def test_blocked_files_blames_a_policy_when_smart_app_control_is_off(monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "smart_app_control", lambda: "evaluation")
+    monkeypatch.setattr(updater, "_sidecar_packages", lambda: [FakeBinaryDist("cffi", ["_cffi_backend.pyd"])])
+    assert updater.blocked_files(probe=lambda path: True)["by"] == "policy"
+    assert updater.blocked_files(probe=lambda path: False) is None
+
+
+def test_blocked_files_only_on_windows(monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    assert updater.blocked_files(probe=lambda path: True) is None
+
+
+def test_sidecar_packages_follows_dependencies():
+    names = {d.metadata["Name"].lower() for d in updater._sidecar_packages()}
+    assert {"fabric-desktop", "pyarrow", "polars", "cryptography"} <= names
+
+
+def test_install_sidecar_reports_blocked_files(monkeypatch, capsys):
+    blocked = {"packages": {"pyarrow": ["pyarrow/lib.pyd"]}, "by": "policy", "smart_app_control": None, "location": "x"}
+    monkeypatch.setattr(updater.subprocess, "call", lambda cmd, **kwargs: 0)
+    monkeypatch.setattr(updater, "load_error", lambda: "ImportError: DLL load failed while importing lib")
+    monkeypatch.setattr(updater, "blocked_files", lambda: blocked)
+    assert updater.install_sidecar(SHA) == 1
+    line = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("blocked "))
+    assert json.loads(line[8:]) == blocked
+
+
+def test_installed_sidecar_reads_the_bundled_engines_build(monkeypatch, tmp_path):
+    (tmp_path / "engine.json").write_text(json.dumps({"commit": SHA}))
+    monkeypatch.setattr(updater.sys, "executable", str(tmp_path / "python.exe"))
+    monkeypatch.setattr(metadata, "distribution", lambda name: FakeDist({"url": "file:///D:/a/wheels/x.whl"}))
+    assert updater.installed_sidecar()["commit"] == SHA
