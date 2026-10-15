@@ -25,17 +25,18 @@ The Python package `fabric_desktop`, run by the shell as `python -m fabric_deskt
 | **Notebook kernel** (`notebook.py`, `lakehouse.py`) | Runs notebook cells in one Python namespace. The `lakehouse` module is the notebook API: `read_csv`, `read_parquet` and `read_json` for `Files/`, plus `read_table`, `write_table` and `sql`. |
 | **SQL engine** (`sql.py`) | Takes Spark SQL, as Fabric's SQL query tab does. sqlglot translates each statement to DuckDB SQL. Every table the query names becomes a DuckDB view over that table's Delta dataset in OneLake. |
 | **Metadata framework** (`meta/`, `meta_service.py`) | Layers, entities, the four gates, SCD Type 1 and 2, incremental loads, quarantine and promotion from Dev to Test to Prod. See the README. |
+| **Fabric hand-off** (`cloud_service.py`, `fabric_run.py`, `maintenance.py`, `semantic.py`, `profiling.py`) | The work that deliberately uses Fabric capacity: Run in Fabric and schedules for published notebooks (with the setup cell that makes `fabric_desktop.lakehouse` work in a Fabric Python notebook), table health and Fabric's table maintenance job (OPTIMIZE with V-Order, VACUUM), and a Direct Lake semantic model written as TMDL. Profiling runs locally and suggests `[[clean]]` and `[[check]]` blocks. |
 | **Job runner** (`jobs.py`, `publish.py`) | TOML job files that run DuckDB SQL or a Polars script and publish the result. |
 | **Auth** (`auth.py`) | MSAL public-client sign-in as you (delegated, no service principal). Tokens for Fabric, Azure Storage and, when consented, the Power BI admin API. The token cache is on the PC. |
 | **OneLake I/O** (`onelake.py`, `publish.py`, `delta_profile.py`) | Builds OneLake paths, lists files and tables, and reads and writes Delta with delta-rs. |
-| **Fabric REST client** (`fabric_api.py`) | Workspaces, items, lakehouses, notebook publish, and the admin workspace scan used for endorsement. |
+| **Fabric REST client** (`fabric_api.py`) | Workspaces, items, lakehouses, notebook publish, job instances and schedules, table maintenance, semantic models, SQL endpoint metadata refresh, and the admin workspace scan used for endorsement. |
 
 ### On this PC
 
 `%LOCALAPPDATA%\FabricDesktop` holds:
 - notebooks (`notebooks\*.ipynb`)
 - the MSAL token cache
-- run history
+- run history, and the jobs this app started in Fabric (`fabric_runs.jsonl`)
 - local staging copies of each write
 - catalog favorites
 - the Fabric view's profile and its saved, encrypted sign-in

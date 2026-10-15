@@ -22,7 +22,10 @@ METHODS = {"environment", "sign_in", "list_workspaces", "list_lakehouses", "crea
            "meta_new_entity", "meta_delete_entity", "meta_set_layers", "meta_run", "meta_runs", "meta_run_detail",
            "meta_preview", "meta_promote_check", "meta_promote", "meta_keys", "meta_set_keys_workspace",
            "meta_new_key_table", "meta_delete_key_table", "meta_key_lookup", "meta_save_source_system",
-           "meta_delete_source_system", "meta_keys_sync", "meta_key_notebook"}
+           "meta_delete_source_system", "meta_keys_sync", "meta_key_notebook",
+           "run_notebook_in_fabric", "fabric_runs", "cancel_fabric_run", "notebook_schedules", "add_notebook_schedule",
+           "delete_notebook_schedule", "meta_health", "meta_optimize", "meta_set_maintenance", "meta_model_plan",
+           "meta_build_model", "meta_profile", "meta_profile_preview", "meta_add_rules"}
 
 
 def handle(service: Service, line: str) -> dict:

@@ -282,8 +282,8 @@ async function renderMonitor() {
   setView(h("div", { class: "page monitor" },
     h("section", { class: "card monitor-local" },
       h("div", { class: "monitor-band" },
-        h("h2", {}, "On this PC"),
-        h("span", { class: "muted-text" }, "Metadata runs (Dev) and notebook writes from Fabric Desktop, newest first"),
+        h("h2", {}, "From Fabric Desktop"),
+        h("span", { class: "muted-text" }, "Metadata runs (Dev), notebook writes, and jobs this app started in Fabric, newest first"),
         h("span", { class: "spacer" }),
         btn("Refresh", "sync", () => render(), "tool outline")),
       local),
@@ -299,9 +299,10 @@ async function renderMonitor() {
       slot)));
   dockFabricView(slot, "monitor", "monitor");
 
-  const [writes, runs] = await Promise.all([
+  const [writes, runs, cloud] = await Promise.all([
     attempt(() => rpc("history")),
     rpc("meta_runs", { env: "dev" }).catch(() => []),  // no metadata project yet
+    rpc("fabric_runs", { limit: 50 }).catch(() => []),  // not signed in yet
   ]);
   if (state.view !== "monitor") return;
   const rows = [
@@ -310,6 +311,12 @@ async function renderMonitor() {
       seconds: r.seconds, rows: r.rows_written,
       detail: r.quarantined ? `${r.quarantined} quarantined` : (r.status === "ok" ? "" : r.message || ""),
       open: () => showRun(r.run_id),
+    })),
+    ...(cloud || []).map((r) => ({
+      at: r.started_at, status: fabricStatus(r.status), activity: r.name, kind: `${r.kind} in Fabric`, env: r.env || "",
+      seconds: r.finished_at ? Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000) : "", rows: "",
+      detail: r.message || r.workspace_name || "",
+      open: r.url ? () => openInFabric(r.url) : null,
     })),
     ...(writes || []).map((r) => ({
       at: r.finished_at, status: "ok", activity: r.job, kind: "Notebook write", env: "",
@@ -324,6 +331,11 @@ async function renderMonitor() {
       h("td", {}, new Date(r.at).toLocaleString()), h("td", {}, r.seconds), h("td", {}, r.rows ?? ""),
       h("td", { class: "muted-text" }, r.detail)))))) :
     h("p", { class: "muted-text monitor-empty" }, "Nothing has run on this PC yet. Run a metadata entity or write a table from a notebook."));
+}
+
+// Fabric job states, shown with the same pills as local runs.
+function fabricStatus(status) {
+  return { Completed: "ok", Failed: "failed", Cancelled: "skipped", Deduped: "skipped" }[status] || "running";
 }
 
 // Fabric's own pages (Monitoring hub, OneLake catalog) are one second webview the shell lays
@@ -1210,6 +1222,110 @@ async function publishNotebook() {
   }
 }
 
+// ---------- Run in Fabric and schedules ----------
+
+// The same notebook, run on the workspace's Fabric capacity: published first, then started
+// with Fabric's job scheduler. It shows in Monitor (both lists) while it runs.
+const FABRIC_DONE = new Set(["Completed", "Failed", "Cancelled", "Deduped"]);
+
+async function runInFabric() {
+  const nb = state.notebook;
+  if (!nb.lakehouse) {
+    toast("Attach a lakehouse first. The notebook runs in that lakehouse's workspace.", true);
+    return;
+  }
+  if (!(await ensureSignedIn())) return;
+  toast(`Publishing ${nb.name} and starting it in ${nb.lakehouse.workspace_name}...`);
+  const run = await attempt(() => rpc("run_notebook_in_fabric", notebookPayload()), "Could not start the run in Fabric");
+  if (!run) return;
+  nb.dirty = false;
+  nb.fabricRun = run;
+  renderChrome();
+  if (state.view === "notebook") renderNotebook();
+  toast(`${nb.name} is running in Fabric. Follow it in Monitor.`);
+  watchFabricRun(nb, run);
+}
+
+async function watchFabricRun(nb, run) {
+  for (let i = 0; i < 360; i++) {  // up to an hour while the app is open
+    await new Promise((r) => setTimeout(r, 10000));
+    const runs = await rpc("fabric_runs", { limit: 50 }).catch(() => null);
+    const now = runs?.find((r) => r.job_id === run.job_id);
+    if (!now) continue;
+    nb.fabricRun = now;
+    if (state.view === "notebook" && state.notebook === nb) renderNotebook();
+    if (FABRIC_DONE.has(now.status)) {
+      toast(now.status === "Completed" ? `${nb.name} finished in Fabric.` : `${nb.name} ${now.status.toLowerCase()} in Fabric. ${now.message || ""}`,
+        now.status !== "Completed");
+      return;
+    }
+  }
+}
+
+// Windows time zone ids, which Fabric schedules use, for the zones people pick most.
+const TIME_ZONES = {
+  "UTC": "UTC", "America/New_York": "Eastern Standard Time", "America/Chicago": "Central Standard Time",
+  "America/Denver": "Mountain Standard Time", "America/Phoenix": "US Mountain Standard Time",
+  "America/Los_Angeles": "Pacific Standard Time", "Europe/London": "GMT Standard Time",
+  "Europe/Paris": "Romance Standard Time", "Europe/Berlin": "W. Europe Standard Time",
+  "Asia/Kolkata": "India Standard Time", "Asia/Singapore": "Singapore Standard Time",
+  "Australia/Sydney": "AUS Eastern Standard Time",
+};
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+async function scheduleNotebook() {
+  const nb = state.notebook;
+  if (!nb.lakehouse) {
+    toast("Attach a lakehouse first. The schedule runs the notebook in that lakehouse's workspace.", true);
+    return;
+  }
+  if (!(await ensureSignedIn())) return;
+  const list = h("div", { class: "scroll" }, h("p", { class: "muted-text" }, "Loading schedules..."));
+  const kind = h("select", {}, h("option", { value: "daily" }, "Every day"), h("option", { value: "weekly" }, "Some days of the week"),
+    h("option", { value: "cron" }, "Every few minutes"));
+  const times = h("input", { value: "06:00", placeholder: "06:00, 18:00" });
+  const minutes = h("input", { type: "number", min: "1", value: "60" });
+  const days = WEEKDAYS.map((d, i) => h("label", { class: "check" }, h("input", { type: "checkbox", value: d, checked: i < 5 ? true : null }), d.slice(0, 3)));
+  const here = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const zone = h("select", {}, Object.entries(TIME_ZONES).map(([iana, win]) =>
+    h("option", { value: win, selected: iana === here ? true : null }, `${win}${iana === "UTC" ? "" : ` (${iana})`}`)));
+  const timesField = h("label", { class: "field" }, "Times of day (24-hour, comma between)", times);
+  const minutesField = h("label", { class: "field", hidden: true }, "Minutes between runs", minutes);
+  const daysField = h("div", { class: "field", hidden: true }, "Days", h("div", { class: "row wrap" }, days));
+  const zoneField = h("label", { class: "field" }, "Time zone", zone);
+  const sync = () => {
+    minutesField.hidden = kind.value !== "cron";
+    timesField.hidden = zoneField.hidden = kind.value === "cron";
+    daysField.hidden = kind.value !== "weekly";
+  };
+  kind.addEventListener("change", sync);
+
+  const show = (res) => {
+    list.replaceChildren(res.schedules.length ? h("table", { class: "mini" }, h("tbody", {}, res.schedules.map((s) => h("tr", {},
+      h("td", {}, s.enabled ? h("span", { class: "pill-s pass" }, "On") : h("span", { class: "pill-s neu" }, "Off")),
+      h("td", {}, s.text),
+      h("td", { class: "n" }, btn("Remove", "delete", async () => {
+        const next = await attempt(() => rpc("delete_notebook_schedule", { name: nb.name, lakehouse_ref: nb.lakehouse, schedule_id: s.id }), "Not removed");
+        if (next) show(next);
+      }, "tool link small"))))))
+      : h("p", { class: "muted-text" }, res.published ? "No schedules yet." : "Not published yet. Adding a schedule publishes it."));
+  };
+  const add = async () => {
+    const schedule = { kind: kind.value, times: times.value.split(","), every_minutes: Number(minutes.value),
+      weekdays: days.map((l) => l.firstChild).filter((c) => c.checked).map((c) => c.value), time_zone: zone.value };
+    toast(`Publishing ${nb.name} and adding the schedule...`);
+    const res = await attempt(() => rpc("add_notebook_schedule", { ...notebookPayload(), schedule }), "Schedule not added");
+    if (res) { nb.dirty = false; renderChrome(); show(res); toast("Scheduled. Fabric runs the published notebook on its own capacity."); }
+  };
+  showDialog(`Schedule ${nb.name} in Fabric`, h("div", { class: "scroll" },
+    h("p", { class: "text" }, `Fabric runs the published notebook in ${nb.lakehouse.workspace_name} on its own capacity, even when this PC is off. Adding a schedule publishes what is on screen first.`),
+    list, h("b", {}, "Add a schedule"), h("label", { class: "field" }, "Repeat", kind), timesField, daysField, minutesField, zoneField),
+  [btn("Close", null, closeDialog, "tool outline"), btn("Add schedule", "add", add, "tool primary")]);
+  sync();
+  const res = await attempt(() => rpc("notebook_schedules", { name: nb.name, lakehouse_ref: nb.lakehouse }), "Could not read schedules");
+  if (res) show(res);
+}
+
 // ---------- Add data items ----------
 
 // Lakehouses across every workspace, like Fabric's OneLake catalog. Favorites are stars kept on
@@ -1382,6 +1498,8 @@ function renderNotebook() {
   const toolbars = {
     home: [runAllBtn, stopBtn, h("div", { class: "sep" }), btn("Add data items", "lakehouse", openDataItems), envBtn,
       h("div", { class: "spacer" }), btn("Save", "save", saveNotebook),
+      btn("Schedule", "history", scheduleNotebook, "tool"),
+      btn("Run in Fabric", "cloud", runInFabric, "tool"),
       btn("Publish to OneLake", "publish", publishNotebook, "tool primary")],
     edit: [btn("Code", "add", () => addCell("code")), btn("Markdown", "add", () => addCell("markdown")),
       h("div", { class: "sep" }), btn("Move up", "up", () => moveCell(-1)), btn("Move down", "down", () => moveCell(1)),
@@ -1389,7 +1507,8 @@ function renderNotebook() {
       btn("Clear all outputs", "clear", clearOutputs)],
     run: [runAllBtn, btn("Run cell", "play", () => runCell(selectedCell()), "tool", { disabled: busy, "data-run": true }),
       btn("Run all above", "up", runAbove, "tool", { disabled: busy, "data-run": true }), stopBtn, h("div", { class: "sep" }),
-      btn("Restart kernel", "restart", restartKernel), btn("Restart and run all", "restart", async () => { await restartKernel(); runAll(); }, "tool", { disabled: busy, "data-run": true })],
+      btn("Restart kernel", "restart", restartKernel), btn("Restart and run all", "restart", async () => { await restartKernel(); runAll(); }, "tool", { disabled: busy, "data-run": true }),
+      h("div", { class: "sep" }), btn("Run in Fabric", "cloud", runInFabric), btn("Schedule", "history", scheduleNotebook)],
     view: [btn(state.showExplorer ? "Hide Explorer" : "Show Explorer", "panel", () => { state.showExplorer = !state.showExplorer; renderNotebook(); })],
   };
 
@@ -1406,7 +1525,8 @@ function renderNotebook() {
     h("footer", { class: "statusbar" },
       h("span", {}, h("span", { class: `dot ${state.kernel}` }), kernelLabel()),
       h("span", {}, `Attached: ${lh ? lh.name : "none"}`),
-      h("span", {}, "Compute: this PC, no Fabric capacity used")));
+      h("span", {}, "Compute: this PC, no Fabric capacity used"),
+      nb.fabricRun ? h("span", {}, `Last Fabric run: ${nb.fabricRun.status === "NotStarted" ? "starting" : nb.fabricRun.status}`) : null));
   document.querySelector(".cells").scrollTop = scrollTop;
   document.querySelectorAll(".editor textarea, .md-edit textarea").forEach(autoGrow);
 }

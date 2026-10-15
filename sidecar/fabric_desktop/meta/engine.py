@@ -330,43 +330,7 @@ class Engine:
         if not rules:
             return df
         t0 = time.perf_counter()
-        changed = 0
-        for r in rules:
-            col = r.get("column")
-            if "dedupe_keep" in r:
-                which, _, order = r["dedupe_keep"].partition(":")
-                before = df.height
-                df = df.sort(order, nulls_last=True).unique(subset=e.keys, keep="last" if which == "newest" else "first",
-                                                            maintain_order=True)
-                changed += before - df.height
-                continue
-            if col not in df.columns:
-                continue
-            expr = pl.col(col)
-            if df.schema[col] == pl.String:
-                if r.get("trim"):
-                    expr = expr.str.strip_chars()
-                case = r.get("case")
-                if case == "lower":
-                    expr = expr.str.to_lowercase()
-                elif case == "upper":
-                    expr = expr.str.to_uppercase()
-                elif case == "title":
-                    expr = expr.str.to_titlecase()
-                for old, new_ in r.get("replace", {}).items():
-                    expr = pl.when(expr == old).then(pl.lit(new_)).otherwise(expr)
-                if r.get("null_if"):
-                    expr = pl.when(expr.is_in(r["null_if"])).then(None).otherwise(expr)
-                if r.get("parse_date"):
-                    fmts = [f.replace("yyyy", "%Y").replace("MM", "%m").replace("dd", "%d") for f in r["parse_date"]]
-                    expr = pl.coalesce([expr.str.to_date(f, strict=False) for f in fmts])
-            if "fill_null" in r:
-                expr = expr.fill_null(r["fill_null"])
-            if "round" in r:
-                expr = expr.round(int(r["round"]))
-            after = df.with_columns(expr.alias("__new"))
-            changed += int((~after[col].cast(pl.String).eq_missing(after["__new"].cast(pl.String))).sum())
-            df = after.with_columns(pl.col("__new").alias(col)).drop("__new")
+        df, changed = apply_clean(df, rules, e.keys)
         self._step(res, "clean", t0, df.height, f"{plural(len(rules), 'rule')}, {plural(changed, 'value')} changed")
         return df
 
@@ -583,6 +547,48 @@ class Engine:
 
 
 # --------------------------------------------------------------------------- dimensions
+
+
+def apply_clean(df: pl.DataFrame, rules: list[dict[str, Any]], keys: list[str]) -> tuple[pl.DataFrame, int]:
+    """Apply ``[[clean]]`` rules in order; returns the cleaned rows and how many values changed."""
+    changed = 0
+    for r in rules:
+        col = r.get("column")
+        if "dedupe_keep" in r:
+            which, _, order = r["dedupe_keep"].partition(":")
+            before = df.height
+            df = df.sort(order, nulls_last=True).unique(subset=keys, keep="last" if which == "newest" else "first",
+                                                        maintain_order=True)
+            changed += before - df.height
+            continue
+        if col not in df.columns:
+            continue
+        expr = pl.col(col)
+        if df.schema[col] == pl.String:
+            if r.get("trim"):
+                expr = expr.str.strip_chars()
+            case = r.get("case")
+            if case == "lower":
+                expr = expr.str.to_lowercase()
+            elif case == "upper":
+                expr = expr.str.to_uppercase()
+            elif case == "title":
+                expr = expr.str.to_titlecase()
+            for old, new_ in r.get("replace", {}).items():
+                expr = pl.when(expr == old).then(pl.lit(new_)).otherwise(expr)
+            if r.get("null_if"):
+                expr = pl.when(expr.is_in(r["null_if"])).then(None).otherwise(expr)
+            if r.get("parse_date"):
+                fmts = [f.replace("yyyy", "%Y").replace("MM", "%m").replace("dd", "%d") for f in r["parse_date"]]
+                expr = pl.coalesce([expr.str.to_date(f, strict=False) for f in fmts])
+        if "fill_null" in r:
+            expr = expr.fill_null(r["fill_null"])
+        if "round" in r:
+            expr = expr.round(int(r["round"]))
+        after = df.with_columns(expr.alias("__new"))
+        changed += int((~after[col].cast(pl.String).eq_missing(after["__new"].cast(pl.String))).sum())
+        df = after.with_columns(pl.col("__new").alias(col)).drop("__new")
+    return df, changed
 
 
 def _next_key(existing: pl.DataFrame | None, sk: str) -> int:

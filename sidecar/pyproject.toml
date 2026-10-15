@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fabric-desktop"
-version = "0.4.0"
+version = "0.5.0"
 description = "Run data jobs on your own machine and publish Delta tables to Microsoft Fabric OneLake."
 requires-python = ">=3.11"
 dependencies = [
