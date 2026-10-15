@@ -268,18 +268,20 @@ def test_sql_result_saves_as_a_table_and_exports_csv(tmp_path, monkeypatch):
     assert service.table_columns(LH, "regions") == [{"name": "Country", "type": "string"}, {"name": "Region", "type": "string"}]
 
 
-def test_spark_notebooks_are_flagged_as_fabric_only():
+def test_pyspark_runs_locally_but_scala_rdds_and_merge_stay_in_fabric():
     from fabric_desktop.fabric_run import compute_check
-    cells = [{"type": "markdown", "source": "spark.read is explained here"},
+    cells = [{"type": "markdown", "source": "spark.sparkContext is explained here"},
              {"type": "code", "source": "import polars as pl\nfrom fabric_desktop import lakehouse"},
-             {"type": "code", "source": "df = spark.read.table('dbo.orders')"},
+             {"type": "code", "source": "df = spark.read.table('dbo.orders')\nnotebookutils.fs.ls('Files')"},
              {"type": "code", "source": "%%sql\nMERGE INTO sk.customer t USING s ON t.id = s.id"},
-             {"type": "code", "source": "%%sql\nselect * from dbo.orders"},
-             {"type": "code", "source": "%%pyspark\nx = 1"}]
+             {"type": "code", "source": "%%sql\ninsert into dbo.orders select * from x"},
+             {"type": "code", "source": "%%pyspark\nx = 1"},
+             {"type": "code", "source": "%%spark\nval x = 1"},
+             {"type": "code", "source": "counts = df.rdd.map(lambda r: r)"}]
     check = compute_check(cells, LH)
     assert not check["local"]["ok"]
-    assert [r["cell"] for r in check["local"]["reasons"]] == [3, 4, 6]
-    assert check["local"]["reasons"][0]["code"] == "df = spark.read.table('dbo.orders')"
+    assert [r["cell"] for r in check["local"]["reasons"]] == [4, 7, 8]
+    assert check["local"]["reasons"][2]["code"] == "counts = df.rdd.map(lambda r: r)"
     assert check["fabric"] == {"ok": True, "reasons": []}
 
 
@@ -295,7 +297,7 @@ def test_local_paths_and_no_lakehouse_keep_a_notebook_off_fabric():
 
 def test_open_and_save_say_where_the_notebook_can_run(tmp_path):
     svc = Service(client_id="x", root=tmp_path)
-    saved = svc.save_notebook("Spark", [{"type": "code", "source": "spark.sql('select 1')"}], LH, "local")
+    saved = svc.save_notebook("Spark", [{"type": "code", "source": "spark.sparkContext.parallelize([1])"}], LH, "local")
     assert saved["check"]["local"]["ok"] is False
     opened = svc.open_notebook("Spark")
     assert opened["compute"] == "local" and opened["check"]["fabric"]["ok"]
