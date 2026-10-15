@@ -20,9 +20,46 @@ const UPDATER: &str = include_str!("updater.py");
 /// The main commit this exe was built from; empty for local builds, which skip updates.
 const BUILD_COMMIT: &str = env!("FABRIC_BUILD_COMMIT");
 
-/// FABRIC_DESKTOP_PYTHON points at the interpreter that has the sidecar installed.
+/// Where release builds get their engine: Python with the sidecar and every package it
+/// needs, built and (once a certificate is set up) code-signed by CI, so the PC's own
+/// Python and its unsigned packages are not involved.
+const ENGINE_URL: &str = "https://github.com/KratosDataGod/fabric-desktop/releases/download/latest/fabric-desktop-engine.zip";
+
+/// Release builds run the bundled engine; local builds, and anyone who sets
+/// FABRIC_DESKTOP_PYTHON, use a Python of their own with the sidecar pip-installed.
+fn bundled() -> bool {
+    !BUILD_COMMIT.is_empty() && std::env::var_os("FABRIC_DESKTOP_PYTHON").is_none()
+}
+
+/// One folder per build: engine\<commit>\python.exe.
+fn engine_root() -> PathBuf {
+    data_dir().join("engine")
+}
+
+/// This build's engine, or failing that another build's, which can still run the
+/// startup check that then updates this exe or the engine.
+fn engine_python() -> Option<PathBuf> {
+    if !bundled() {
+        return None;
+    }
+    let exact = engine_root().join(BUILD_COMMIT).join("python.exe");
+    if exact.exists() {
+        return Some(exact);
+    }
+    std::fs::read_dir(engine_root())
+        .ok()?
+        .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path().join("python.exe"))
+        .find(|p| p.exists())
+}
+
+/// The interpreter that runs the sidecar and the startup check.
 fn python() -> String {
-    std::env::var("FABRIC_DESKTOP_PYTHON").unwrap_or_else(|_| "python".into())
+    if let Ok(path) = std::env::var("FABRIC_DESKTOP_PYTHON") {
+        return path;
+    }
+    engine_python().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "python".into())
 }
 
 fn hide_window(cmd: &mut Command) {
@@ -185,15 +222,26 @@ fn stop_kernel(state: tauri::State<'_, SidecarState>) -> Result<(), String> {
 /// latest release. Fails only when Python itself cannot run.
 #[tauri::command]
 async fn check_components() -> Result<Value, String> {
-    let out = updater(&["check"])
-        .output()
-        .map_err(|e| format!("Python was not found ({e})."))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("Python could not run the startup check. {}", stderr.trim()));
-    }
-    let mut report: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|_| "Python gave an unexpected answer to the startup check.".to_string())?;
+    let mut report = if bundled() && engine_python().is_none() {
+        // Nothing to run the check with until the engine is installed; the UI installs
+        // it and then checks again.
+        json!({
+            "python": null, "python_ok": true,
+            "sidecar": { "version": null, "commit": null, "editable": false },
+            "latest": { "commit": null, "error": null },
+        })
+    } else {
+        let out = updater(&["check"])
+            .output()
+            .map_err(|e| format!("Python was not found ({e})."))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("Python could not run the startup check. {}", stderr.trim()));
+        }
+        serde_json::from_slice(&out.stdout)
+            .map_err(|_| "Python gave an unexpected answer to the startup check.".to_string())?
+    };
+    report["bundled"] = json!(bundled());
     // Set by the exe that updated us, so the check can tell whether the update took.
     let args: Vec<String> = std::env::args().collect();
     let updated_to = args.iter().position(|a| a == "--updated-to").and_then(|i| args.get(i + 1));
@@ -205,16 +253,82 @@ async fn check_components() -> Result<Value, String> {
     Ok(report)
 }
 
-/// Installs the sidecar from the commit this exe was built from, so the two always match.
+/// Installs the sidecar from the commit this exe was built from, so the two always match:
+/// the bundled engine for release builds, else pip into the user's Python. Returns the
+/// engine's build, which can be newer than this exe when the release has moved on.
 #[tauri::command]
-async fn update_sidecar(app: tauri::AppHandle, state: tauri::State<'_, SidecarState>) -> Result<(), String> {
+async fn update_sidecar(app: tauri::AppHandle, state: tauri::State<'_, SidecarState>) -> Result<Value, String> {
     if BUILD_COMMIT.is_empty() {
         return Err("This is a local build, so it cannot pick a sidecar version. Install it with pip.".into());
     }
-    // A running sidecar holds its files open, which blocks pip on Windows.
+    // A running sidecar holds its files open, which blocks pip and the engine swap on Windows.
     stop_kernel(state.clone())?;
     *state.sidecar.lock().map_err(|e| e.to_string())? = None;
-    stream(&app, updater(&["install-sidecar", BUILD_COMMIT]))
+    if bundled() {
+        return install_engine(&app).map(|commit| json!({ "engine": commit }));
+    }
+    stream(&app, updater(&["install-sidecar", BUILD_COMMIT]))?;
+    Ok(Value::Null)
+}
+
+/// Runs one of Windows' own tools (curl, tar), returning its error output when it fails.
+fn run_tool(mut cmd: Command, what: &str) -> Result<(), String> {
+    hide_window(&mut cmd);
+    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("Could not {what}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(format!("Could not {what}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+}
+
+/// Downloads the latest engine and unpacks it to engine\<its commit>, then removes
+/// other builds' engines. Uses curl.exe and tar.exe, which come with Windows.
+fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
+    let say = |line: &str| {
+        let _ = app.emit("component-log", line);
+    };
+    let root = engine_root();
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let zip = root.join("download.zip");
+    let staging = root.join(".new");
+    let nocache = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+    say("Downloading the engine (Python and its packages, about 150 MB)…");
+    let mut curl = Command::new("curl.exe");
+    curl.args(["-L", "--fail", "-sS", "-H", "Cache-Control: no-cache", "-o"])
+        .arg(&zip)
+        .arg(format!("{ENGINE_URL}?nocache={nocache}"));
+    run_tool(curl, "download the engine")?;
+
+    say("Unpacking the engine…");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let mut tar = Command::new("tar.exe");
+    tar.arg("-xf").arg(&zip).arg("-C").arg(&staging);
+    run_tool(tar, "unpack the engine")?;
+    let _ = std::fs::remove_file(&zip);
+
+    let info: Value = std::fs::read_to_string(staging.join("engine.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .ok_or("The engine download has no engine.json, so it is not a Fabric Desktop engine.")?;
+    let commit = info["commit"].as_str().unwrap_or_default().to_string();
+    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("The engine download does not say which build it is.".into());
+    }
+    let dest = root.join(&commit);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::rename(&staging, &dest).map_err(|e| format!("Could not put the engine in place: {e}"))?;
+
+    // Engines of other builds are no longer needed; one still in use goes next time.
+    for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != commit && name != BUILD_COMMIT && entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    say(&format!("Installed engine build {}.", &commit[..7]));
+    Ok(commit)
 }
 
 /// Downloads the latest exe (refusing any build but `commit`), swaps it in place of this

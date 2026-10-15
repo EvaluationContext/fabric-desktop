@@ -2103,8 +2103,9 @@ function blockedHelp(blocked) {
 }
 
 // Before the sidecar starts, make sure this exe, Python and the sidecar are
-// current and match each other, updating whatever is behind.
-async function checkComponents() {
+// current and match each other, updating whatever is behind. Release builds run a
+// bundled engine; after installing one, the check runs once more (afterInstall) with it.
+async function checkComponents(afterInstall = false) {
   const short = (commit) => commit.slice(0, 7);
   const rows = {};
   const row = (key, label) => (rows[key] = h("div", { class: "startup-row", "data-status": "busy" },
@@ -2139,11 +2140,16 @@ async function checkComponents() {
   }
   const { app, sidecar, latest } = report;
 
-  set("python", report.python_ok ? "ok" : "error",
-    report.python_ok ? report.python : `${report.python} is too old. Fabric Desktop needs Python 3.11 or later.`);
+  if (report.bundled) {
+    set("python", report.python ? "ok" : "skip", report.python ? `${report.python}, part of the engine` : "Comes with the engine");
+  } else {
+    set("python", report.python_ok ? "ok" : "error",
+      report.python_ok ? report.python : `${report.python} is too old. Fabric Desktop needs Python 3.11 or later.`);
+  }
 
   state.build = app.commit ? short(app.commit) : `${app.version} (local build)`;
   if (!app.commit) set("app", "ok", `${app.version}, local build (update check off)`);
+  else if (report.bundled && !report.python) set("app", "ok", `Build ${short(app.commit)}; checked for updates once the engine is installed`);
   else if (app.updated_to && app.updated_to !== app.commit) {
     set("app", "error", `The update didn't take: this is still build ${short(app.commit)}, not ${short(app.updated_to)}. ` +
       "Download fabric-desktop.exe again from the latest release.");
@@ -2188,7 +2194,15 @@ async function checkComponents() {
   } else if (sidecar.commit === app.commit && sidecar.blocked) {
     showBlocked(sidecar.blocked);
   } else {
+    if (afterInstall && report.bundled) {
+      // The engine just installed is still not this build's: the exe update above failed.
+      set("sidecar", "error", `The latest engine is build ${sidecar.commit ? short(sidecar.commit) : "unknown"}, ` +
+        `but this app is ${short(app.commit)}. Restart Fabric Desktop to update it.`);
+      if (await choose("Retry", "Continue anyway") === 0) return checkComponents();
+      return closeDialog();
+    }
     set("sidecar", "busy", sidecar.commit === app.commit ? `Repairing (it would not start: ${sidecar.error})…`
+      : report.bundled ? (sidecar.version ? "Updating the engine…" : "Installing the engine…")
       : sidecar.version ? `Updating to build ${short(app.commit)}…` : `Installing build ${short(app.commit)}…`);
     log.hidden = false;
     let blocked = null;
@@ -2198,12 +2212,18 @@ async function checkComponents() {
       log.scrollTop = log.scrollHeight;
     });
     try {
-      await invoke("update_sidecar");
+      const result = await invoke("update_sidecar");
+      if (result?.engine) {
+        // Check again with the new engine: it may be a newer build than this exe, and
+        // it may be blocked from loading.
+        return checkComponents(true);
+      }
       set("sidecar", "ok", `Updated to build ${short(app.commit)}`);
       log.hidden = true;
     } catch (err) {
       if (blocked) showBlocked(blocked);
-      else set("sidecar", "error", "Update failed. The pip output is below.");
+      else set("sidecar", "error", report.bundled ? "The engine could not be installed. Details are below."
+        : "Update failed. The pip output is below.");
       // The error repeats the last lines of output, which the log already shows.
       const shown = new Set(log.textContent.split("\n"));
       const extra = String(err).split("\n").filter((l) => !shown.has(l) && !l.startsWith("blocked {"));

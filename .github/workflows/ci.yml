@@ -25,6 +25,65 @@ jobs:
           python -m pip install --no-deps --target "$RUNNER_TEMP/installed" .
           cd "$RUNNER_TEMP" && PYTHONPATH=installed python -c "import fabric_desktop.server"
 
+  engine:
+    # Release builds run this engine instead of the PC's Python: python.org's embeddable
+    # Python (signed by the PSF) plus the sidecar and every package it needs. Windows
+    # Smart App Control blocks those packages' DLLs unless they are signed, so they are
+    # signed here once a Trusted Signing account is set up (see README, "Code signing").
+    runs-on: windows-latest
+    env:
+      PYTHON_VERSION: "3.12.10"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the engine folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "$env:RUNNER_TEMP\engine"
+          Invoke-WebRequest "https://www.python.org/ftp/python/$env:PYTHON_VERSION/python-$env:PYTHON_VERSION-embed-amd64.zip" -OutFile "$env:RUNNER_TEMP\embed.zip"
+          Expand-Archive "$env:RUNNER_TEMP\embed.zip" $dir
+          # The ._pth file fixes sys.path, so the PC's own packages and PYTHONPATH never mix in.
+          Set-Content "$dir\python312._pth" "python312.zip`r`n.`r`nLib\site-packages`r`nimport site" -Encoding ascii
+          python -m pip wheel --no-deps -w "$env:RUNNER_TEMP\wheels" ./sidecar
+          python -m pip install --only-binary=:all: --target "$dir\Lib\site-packages" pip (Get-ChildItem "$env:RUNNER_TEMP\wheels\*.whl").FullName
+          @{ commit = "$env:GITHUB_SHA"; python = "$env:PYTHON_VERSION" } | ConvertTo-Json | Set-Content "$dir\engine.json" -Encoding ascii
+          "ENGINE_DIR=$dir" >> $env:GITHUB_ENV
+      - name: Check the engine starts on its own
+        shell: pwsh
+        run: |
+          & "$env:ENGINE_DIR\python.exe" -c "import fabric_desktop.server, pyarrow, polars, duckdb, deltalake, msal, ssl, ctypes, winreg"
+          if ($LASTEXITCODE) { exit 1 }
+          & "$env:ENGINE_DIR\python.exe" -c "import site, sys; assert site.getusersitepackages() not in sys.path, sys.path"
+          if ($LASTEXITCODE) { exit 1 }
+      - name: Sign the engine's packages
+        if: vars.TRUSTED_SIGNING_ACCOUNT != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          # Python's own files are already signed by the PSF; only the packages need it.
+          files-folder: ${{ env.ENGINE_DIR }}\Lib\site-packages
+          files-folder-filter: dll,pyd,exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Zip the engine
+        shell: pwsh
+        run: 7z a -tzip -mx=5 fabric-desktop-engine.zip "$env:ENGINE_DIR\*"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fabric-desktop-engine
+          path: fabric-desktop-engine.zip
+          if-no-files-found: error
+
   shell:
     runs-on: windows-latest
     defaults:
@@ -40,6 +99,20 @@ jobs:
         env:
           # Builds of main carry their commit, so the app can tell when a newer release exists.
           FABRIC_RELEASE_COMMIT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || '' }}
+      - name: Sign the exe
+        if: vars.TRUSTED_SIGNING_ACCOUNT != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\app\src-tauri\target\release\fabric-desktop.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - uses: actions/upload-artifact@v4
         with:
           name: fabric-desktop-windows
@@ -49,7 +122,7 @@ jobs:
   release:
     # Every green build of main replaces the "latest" release with the new exe.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [sidecar, shell]
+    needs: [sidecar, engine, shell]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -57,13 +130,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: fabric-desktop-windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: fabric-desktop-engine
       - env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           echo "{\"commit\": \"$GITHUB_SHA\"}" > version.json
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest fabric-desktop.exe version.json \
+          gh release create latest fabric-desktop.exe fabric-desktop-engine.zip version.json \
             --title "Fabric Desktop (latest build)" \
             --notes "Built automatically from ${GITHUB_SHA::7} on main. Download fabric-desktop.exe and double-click it." \
             --target "$GITHUB_SHA"

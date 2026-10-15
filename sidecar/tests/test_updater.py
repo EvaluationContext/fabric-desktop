@@ -208,3 +208,10 @@ def test_install_sidecar_reports_blocked_files(monkeypatch, capsys):
     assert updater.install_sidecar(SHA) == 1
     line = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("blocked "))
     assert json.loads(line[8:]) == blocked
+
+
+def test_installed_sidecar_reads_the_bundled_engines_build(monkeypatch, tmp_path):
+    (tmp_path / "engine.json").write_text(json.dumps({"commit": SHA}))
+    monkeypatch.setattr(updater.sys, "executable", str(tmp_path / "python.exe"))
+    monkeypatch.setattr(metadata, "distribution", lambda name: FakeDist({"url": "file:///D:/a/wheels/x.whl"}))
+    assert updater.installed_sidecar()["commit"] == SHA

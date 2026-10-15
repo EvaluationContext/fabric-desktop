@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 REPO = "KratosDataGod/fabric-desktop"
 RELEASE = f"https://github.com/{REPO}/releases/download/latest"
@@ -43,6 +44,10 @@ def installed_sidecar() -> dict:
         match = COMMIT.search(direct.get("url", ""))
         commit = match.group(1) if match else None
     editable = bool((direct.get("dir_info") or {}).get("editable"))
+    # The bundled engine is installed from a wheel CI built, and says its build here.
+    engine = Path(sys.executable).with_name("engine.json")
+    if engine.is_file():
+        commit = json.loads(engine.read_text()).get("commit") or commit
     return {"version": dist.version, "commit": commit, "editable": editable}
 
 
