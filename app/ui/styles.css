@@ -553,3 +553,31 @@ h2.flush { margin: 0; }
 .env-tile:hover { border-color: var(--accent); }
 .home-start { align-items: center; gap: 8px; }
 .home-start h2 { margin: 0 8px 0 0; }
+
+/* ---------- dataops.js: compare, quarantine, freshness ---------- */
+.dataops h3 { margin: 12px 0 4px; font-size: 14px; }
+.cmp-pick { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+.cmp-side { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; }
+.cmp-side > b { align-self: center; min-width: 40px; }
+.cmp-side .field { min-width: 140px; }
+.cmp-vs { color: var(--muted); padding-bottom: 18px; }
+.cmp-out { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.cmp-stats { display: flex; gap: 8px; flex-wrap: wrap; }
+.cmp-stat { display: flex; flex-direction: column; min-width: 120px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.cmp-stat .v { font-size: 20px; font-weight: 600; }
+.cmp-stat .k { font-size: 12px; color: var(--muted); }
+.cmp-stat.bad { border-color: #f1c27d; background: #fffaf0; }
+.cmp-result td.old { color: var(--danger); text-decoration: line-through; }
+.cmp-result td.new { color: #0e5c2a; font-weight: 600; }
+.cmp-result td.diff { font-weight: 600; }
+.promote-impact { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.quarantine .qtable { padding: 0; max-height: 360px; overflow: auto; }
+.quarantine .qtable th { position: sticky; top: 0; background: var(--surface); }
+.quarantine .qtable th.ro, .quarantine .qtable td.ro { color: var(--muted); }
+.qcell { width: 100%; min-width: 80px; font: inherit; font-size: 13px; padding: 2px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; }
+.qcell:hover, .qcell:focus { border-color: var(--border-input); background: var(--surface); }
+.qcell.changed { border-color: #0f548c; background: #e8f1fb; font-weight: 600; }
+.fresh-ok { display: flex; align-items: center; gap: 6px; }
+.drift-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--border-soft); }
+.drift-row select { max-width: 160px; flex: none; }
+.drift-row .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

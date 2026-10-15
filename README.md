@@ -157,6 +157,25 @@ Changing settings in `environments.toml` no longer changes the metadata version,
 
 **Metadata > Semantic model** builds a Direct Lake semantic model over a layer's tables (the last layer, usually Gold) in Test or Prod. It reads the layer's lakehouse through its SQL analytics endpoint, with no import and no refresh schedule. Each entity is a table, facts get a row count measure, and relationships come from the metadata: a fact's `[[lookup]]` names the dimension and its key, and any other column named like a dimension's surrogate key joins to it. Surrogate keys, `_run_id` and `_loaded_at` are hidden. **Create model** creates `SM_<Layer>` in the environment's workspace (you can rename it); building again updates it in place and keeps every lineage tag, so reports on it keep working. The app asks the SQL endpoint to pick up new tables first.
 
+### Compare, schema drift, quarantine replay and freshness
+
+**Compare** on an entity's page puts the table in two places side by side: Dev against Test or Prod, or the table now against an earlier Delta version. It shows row counts, keys only on one side, which columns changed value for the same key (with the first changed rows, old and new), and how each number column's total moved. Surrogate keys, run stamps and Type 2 dates are left out, since each environment issues its own. Each promote card lists the tables whose logic differs from what last ran in the target, with a Compare for each, so you see what a promote does to the numbers before you press it.
+
+**Schema drift** on an entity's page reads its source now (the files, or the upstream table) and lists what differs from the contract: new columns, columns that are gone, and columns whose type changed. Tick a new column to add it to the contract, mark a gone column as renamed to a new one (written as `[source] rename = { "cust_id" = "customer_id" }`, applied as the source is read) or remove it from the contract, take a column's new type, and choose this table's own policy for new columns (`[contract] drift`, otherwise the layer's). **Save to config** writes the decisions into the entity file through the save gate.
+
+When a check holds rows back, the entity page shows **Quarantine** with the rows and the check that held each one. Fix values in place, or fix the check in the config and save, then **Replay selected**: the rows go through the output contract, the derived columns and every check again, and are written like any run (logged as a `replay` run, without moving the watermark). Rows that still fail stay in quarantine with the new reason. Downstream tables read incrementally, so after a replay the app offers to rebuild them. **Discard selected** removes rows that should never load.
+
+**Freshness** on an entity's page sets when the table should have a successful run: `within_hours`, a daily `by` time (this PC's clock), or both, in the environments you pick (Test and Prod when left out). It is saved in the entity file:
+
+```toml
+[freshness]
+within_hours = 26
+by = "07:00"
+envs = ["prod"]
+```
+
+Late tables show on Home and in the bell. **Set up Teams alerts** takes the address of a Teams Workflows webhook ("Post to a channel when a webhook request is received"); each late or failed table is then posted once. The app checks at startup and every 10 minutes while it is open.
+
 ## Job files
 
 ```toml

@@ -297,6 +297,7 @@ async function renderEntity() {
           if (res) { toast(`Deleted ${e.name}`); goMeta("entities"); }
         }, "tool outline"),
         btn("Profile", "dataBarVertical", () => profileEntity(e.name), "tool outline"),
+        btn("Compare", "flow", () => compareDialog(e.name), "tool outline"),
         btn("Rebuild with downstream", "sync", () => runEntities([e.name], { cascade: true }), "tool outline"),
         btn(inFabric(state.meta.project, state.meta.env) ? `Run in Fabric (${ENV_LABEL[state.meta.env]})` : `Run in ${ENV_LABEL[state.meta.env]}`, "play",
           () => (dirty() ? save() : Promise.resolve()).then(() => runEntities([e.name])), "tool primary"))),
@@ -321,7 +322,10 @@ async function renderEntity() {
             h("div", {}, h("span", { class: "muted-text small" }, "Feeds"),
               e.impact.length ? e.impact.map((r) => h("button", { class: "node", onclick: () => openEntity(r) }, entityName(r)))
                 : h("span", { class: "muted-text small" }, "Nothing reads it yet")))),
+        driftCard(e),
+        freshnessCard(e),
         recentRuns)),
+    quarantineCard(e),
     keysCard(e),
     e.preview ? h("div", { class: "card pad" }, h("b", {}, `Data in ${ENV_LABEL[state.meta.env]} · ${e.preview.total} rows`), dataTable(e.preview)) : null));
 }
@@ -571,7 +575,7 @@ async function renderEnvTab(body, p) {
           if (res) { toast(`${ENV_LABEL[target]} is now on metadata ${res.version}`, false, { log: true }); render(); }
         }, "tool primary small")),
       h("p", { class: "muted-text" }, "Needs the project to pass the save gate, and every table's last run here to be green on this exact metadata version. Lakehouses that don't exist yet are created."),
-      box);
+      box, promoteImpact(source, target));
   };
   body.replaceChildren(h("div", { class: "env-cards" }, ["dev", "test", "prod"].map(card)),
     promoteRow("dev", "test"), promoteRow("test", "prod"));
