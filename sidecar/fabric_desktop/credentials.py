@@ -175,7 +175,8 @@ def from_config(auth: dict[str, Any]) -> Credential:
     if kind == "managed_identity":
         return ManagedIdentity(auth.get("client_id", ""), auth.get("tenant_id", ""))
     if kind == "user":
+        from . import app_settings
         from .auth import Authenticator
-        return Authenticator(auth.get("client_id", "") or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", ""),
+        return Authenticator(auth.get("client_id", "") or app_settings.value("client_id"),
                              interactive=False)
     raise ValueError('[auth] type is "service_principal", "managed_identity" or "user"')

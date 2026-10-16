@@ -17,8 +17,9 @@
     <div class="search-wrap">
       <label class="search">
         <span data-icon="search" data-size="16"></span>
-        <span class="sr-only">Search</span>
-        <input id="search" type="search" placeholder="Search notebooks, workspaces and lakehouses">
+        <span class="sr-only">Search or run a command</span>
+        <input id="search" type="search" placeholder="Search or run a command" autocomplete="off">
+        <kbd>Ctrl+K</kbd>
       </label>
     </div>
     <div class="topbar-right">
@@ -30,15 +31,11 @@
 
   <div class="body">
     <nav id="rail" class="rail" aria-label="Main">
-      <button class="rail-item" data-view="home"><span data-icon="home" data-size="22"></span>Home</button>
-      <button class="rail-item" data-view="create"><span data-icon="create" data-size="22"></span>Create</button>
-      <button class="rail-item" data-view="workspaces"><span data-icon="workspaces" data-size="22"></span>Workspaces</button>
-      <button class="rail-item" data-view="onelake"><span data-icon="onelake" data-size="22"></span>OneLake</button>
-      <button class="rail-item" data-view="metadata"><span data-icon="metadata" data-size="22"></span>Metadata</button>
-      <button class="rail-item" data-view="fabric"><span data-icon="cloud" data-size="22"></span>Fabric</button>
-      <button class="rail-item" data-view="monitor"><span data-icon="monitor" data-size="22"></span>Monitor</button>
+      <div id="rail-main" class="rail-group"></div>
       <div class="rail-divider"></div>
       <div id="rail-open"></div>
+      <div class="rail-spacer"></div>
+      <div id="rail-bottom" class="rail-group"></div>
     </nav>
 
     <main id="view" class="view"></main>
@@ -49,6 +46,7 @@
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="icons.js"></script>
+  <script src="features.js"></script>
   <script src="activity.js"></script>
   <script src="vendor/codemirror/codemirror.js"></script>
   <script src="app.js"></script>
@@ -58,5 +56,6 @@
   <script src="estate.js"></script>
   <script src="schedules.js"></script>
   <script src="xray.js"></script>
+  <script src="settings.js"></script>
 </body>
 </html>

@@ -43,9 +43,10 @@ function runReason(r) {
 function friendlyError(err) {
   const raw = String(err?.message || err || "").trim();
   const known = [
-    [/FABRIC_DESKTOP_CLIENT_ID|client\) ID is required/i, "Sign-in isn't set up on this PC yet. The app needs its Entra app registration (see the README)."],
+    [/FABRIC_DESKTOP_CLIENT_ID|client\) ID is required|which app to sign in with/i, "Sign-in isn't set up on this PC yet. Open Settings > Account and paste the app (client) ID your Fabric admin gave you."],
+    [/AADSTS700016|AADSTS90094|AADSTS90008|admin_consent|needs? admin approval/i, "Your organization hasn't approved Fabric Desktop yet. A Microsoft Entra admin approves it once for everyone: Settings > Account has the link to send them."],
     [/Capacity\.Read\.All|list_?capacities/i, "Listing capacities needs the Capacity.Read.All permission (Power BI Service) on the app's Entra registration. Add it, grant consent, then sign in again. docs/permissions.md has every permission and the steps."],
-    [/InsufficientScopes|AADSTS65001|consent_required/i, "The app's Entra registration is missing a permission this needs. docs/permissions.md lists which feature needs which permission; add it, grant consent, then sign in again."],
+    [/InsufficientScopes|AADSTS65001|consent_required/i, "Your organization hasn't approved the permission this needs. Send your Microsoft Entra admin the approval link from Settings > Account, then sign in again."],
     [/AADSTS|invalid_grant|interaction_required|\b401\b|Unauthorized|token.*expired/i, "Your sign-in expired. Sign in again and retry."],
     [/\b403\b|Forbidden|InsufficientPrivileges|PrincipalTypeNotSupported/i, "You don't have permission for that in this workspace. A workspace admin can make you a Contributor or above."],
     [/\b404\b|NotFound|ItemNotFound|does not exist/i, "Fabric couldn't find that item. It may have been deleted or renamed."],
@@ -211,7 +212,7 @@ const ENV_VIEWS = new Set(["metadata", "entity"]);
 function renderEnvBar() {
   const slot = document.getElementById("env-slot");
   if (!slot || !state.meta) return;
-  if (!ENV_VIEWS.has(state.view)) { slot.replaceChildren(); return; }
+  if (!ENV_VIEWS.has(state.view) || !state.meta.project?.path) { slot.replaceChildren(); return; }
   const env = state.meta.env;
   const where = envWhere(state.meta.project, env);
   const select = h("select", { class: "env-select", "aria-label": "Environment", onchange: (e) => setGlobalEnv(e.target.value) },

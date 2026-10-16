@@ -142,6 +142,8 @@ function closeMenu() {
 // ---------- account and data ----------
 
 async function signIn() {
+  if (!state.settings) await loadSettings();
+  if (state.settings && !clientId() && !(await signInSetup())) return false;
   const result = await attempt(() => rpc("sign_in"), "Sign-in failed");
   if (!result) return false;
   state.user = result.user;
@@ -183,9 +185,9 @@ function renderChrome() {
   account.classList.toggle("signed-out", !state.user);
   account.title = state.user ? `Signed in as ${state.user}` : "Sign in";
 
-  document.querySelectorAll("#rail .rail-item[data-view]").forEach((el) => {
-    el.classList.toggle("active", el.dataset.view === (state.view === "entity" ? "metadata" : state.view));
-  });
+  document.getElementById("rail-main").replaceChildren(...railFeatures().map(railItem));
+  document.getElementById("rail-bottom").replaceChildren(...railFeatures(true).map(railItem));
+  syncSearchBox();
   // Items opened recently, each with a close button.
   const open = [];
   const recent = (view, iconName, label, onOpen, onClose) => h("div", { class: "rail-open-item" },
@@ -236,9 +238,7 @@ function renderChrome() {
 function render() {
   renderChrome();
   if (state.view !== fabricView.owner) placeFabricView();
-  const views = { home: renderHome, create: renderCreate, workspaces: renderWorkspaces, workspace: renderWorkspace,
-    onelake: renderOneLake, fabric: renderFabric, monitor: renderMonitor, lakehouse: renderLakehouse, query: renderQuery, notebook: renderNotebook, ...window.META_VIEWS };
-  (views[state.view] || renderHome)();
+  (features.views[state.view] || renderHome)();
 }
 
 function setView(...children) {
@@ -282,7 +282,9 @@ async function renderHome() {
   const upcoming = h("div", { class: "muted-text" }, "Loading...");
   const envCards = h("div", { class: "home-envs" });
   const list = h("div", { class: "muted-text" }, "Loading notebooks...");
-  const xray = xrayCard();
+  const xray = previewShown() ? xrayCard() : null;
+  const envSection = h("section", {}, h("h2", {}, "Environments"), envCards);
+  let notebookCount = 0;
   setView(h("div", { class: "page home" },
     h("h1", {}, name ? `Welcome back, ${name}` : "Welcome to Fabric Desktop"),
     summary,
@@ -292,7 +294,7 @@ async function renderHome() {
     h("div", { class: "home-two" },
       h("section", { class: "card pad" }, h("h2", {}, "Running now"), running),
       h("section", { class: "card pad" }, h("h2", {}, "Coming up"), upcoming)),
-    h("section", {}, h("h2", {}, "Environments"), envCards),
+    envSection,
     h("section", { class: "row wrap home-start" }, h("h2", {}, "Start something"),
       btn("New notebook", "notebook", newNotebook, "tool outline"),
       btn("New lakehouse", "lakehouse", () => newLakehouse(), "tool outline"),
@@ -312,6 +314,7 @@ async function renderHome() {
   // The sidecar answers one call at a time, so the quick local ones go first.
   const notebooksDone = rpc("list_notebooks").catch(() => null).then((notebooks) => {
     if (!onHome()) return;
+    notebookCount = (notebooks || []).length;
     const shown = (notebooks || []).filter((n) => matches(n.name)).slice(0, 8);
     list.replaceWith(shown.length ? h("table", { class: "list" },
       h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Modified"))),
@@ -358,6 +361,12 @@ async function renderHome() {
     if (!onHome()) return;
     if (project) state.meta.project = project;
     const hasProject = !!project?.path;
+    // Environments mean nothing before there's a metadata project: show the first steps instead.
+    if (!hasProject) {
+      await notebooksDone;
+      if (!onHome()) return;
+      envSection.replaceWith(getStarted(project, notebookCount) || "");
+    }
 
     // The latest run of each table in each environment says how that table stands now.
     const latest = new Map();
@@ -413,7 +422,7 @@ async function renderHome() {
 
   // The X-ray's saved scan is read last, so it never holds up the rest of Home.
   await Promise.allSettled([notebooksDone, upcomingDone, runsDone]);
-  if (onHome() && xray.isConnected) loadXray(xray, false);
+  if (onHome() && xray?.isConnected) loadXray(xray, false);
 }
 
 function tile(iconName, title, desc, onClick) {
@@ -423,7 +432,7 @@ function tile(iconName, title, desc, onClick) {
 
 function renderCreate() {
   setView(h("div", { class: "page" },
-    h("h1", {}, "Create"), h("p", { class: "sub" }, "Items you create here run on this PC and store their data in OneLake."),
+    h("h1", {}, "Create"), h("p", { class: "sub" }, "Items you create here run on this PC and store their data in OneLake. ", learnMore("create")),
     h("h2", {}, "Data engineering"),
     h("div", { class: "tiles" },
       tile("notebook", "Notebook", "Explore, transform and write Delta tables with Python", newNotebook),
@@ -435,6 +444,7 @@ const monitorPage = { env: "all", where: "any", problemsFirst: true, showFabric:
 try { monitorPage.showFabric = localStorage.getItem("fd.monitor.fabric") !== "hidden"; } catch { /* default: shown */ }
 
 async function renderMonitor() {
+  if (!previewShown()) monitorPage.panel = "runs";
   const local = h("div", { class: "muted-text monitor-empty" }, "Loading runs...");
   const slot = h("div", { class: "fabric-slot" },
     h("p", { class: "muted-text" }, "Opening the Fabric Monitoring hub. Sign in once and the app remembers it."));
@@ -453,11 +463,11 @@ async function renderMonitor() {
         h("h2", {}, "From Fabric Desktop"),
         h("div", { class: "seg", role: "group", "aria-label": "Show" },
           h("button", { class: monitorPage.panel === "runs" ? "on" : null, onclick: () => { monitorPage.panel = "runs"; render(); } }, "Runs"),
-          h("button", { class: monitorPage.panel === "schedules" ? "on" : null, onclick: () => { monitorPage.panel = "schedules"; render(); } }, "Schedules"),
-          h("button", { class: monitorPage.panel === "cost" ? "on" : null, onclick: () => { monitorPage.panel = "cost"; render(); } }, "Cost")),
+          preview("schedules", h("button", { class: monitorPage.panel === "schedules" ? "on" : null, onclick: () => { monitorPage.panel = "schedules"; render(); } }, "Schedules")),
+          preview("cost", h("button", { class: monitorPage.panel === "cost" ? "on" : null, onclick: () => { monitorPage.panel = "cost"; render(); } }, "Cost"))),
         h("span", { class: "muted-text" }, monitorPage.panel === "cost" ? "Capacity each run used in Fabric, and what running on this PC saved"
           : monitorPage.panel === "schedules" ? "Every schedule, on this PC and in Fabric, with how its last run went"
-          : "Everything this app ran or started, in every environment, on this PC and in Fabric"),
+          : "Everything this app ran or started, in every environment, on this PC and in Fabric", " ", learnMore("monitor")),
         h("span", { class: "spacer" }),
         btn("Refresh", "sync", () => render(), "tool outline")),
       monitorPage.panel !== "runs" ? null : h("div", { class: "monitor-filters" },
@@ -590,7 +600,7 @@ async function renderWorkspaces() {
   const body = h("div", {}, h("p", { class: "muted-text" }, state.user ? "Loading workspaces..." : ""));
   const chips = h("div", { class: "ws-filters" });
   setView(h("div", { class: "page" }, h("h1", {}, "Workspaces"),
-    h("p", { class: "sub" }, "Your Fabric workspaces. Expand one to see its items, star your favorites and pin the ones you use most."),
+    h("p", { class: "sub" }, "Your Fabric workspaces. Expand one to see its items, star your favorites and pin the ones you use most. ", learnMore("workspaces")),
     signInCallout(), chips, body));
   if (!state.user) return;
   const [workspaces, marks] = await Promise.all([loadWorkspaces(),
@@ -824,10 +834,13 @@ const TYPE_GROUP_LABEL = { ...Object.fromEntries(TYPE_GROUPS.map(([id, label]) =
 function onelakeTabs() {
   const tab = (id, label) => h("button", { class: `tab${catalogPage.tab === id ? " active" : ""}`,
     onclick: () => { catalogPage.tab = id; render(); } }, label);
-  return h("div", { class: "subtabs onelake-tabs" }, tab("catalog", "Catalog"), tab("shortcuts", "Shortcuts"), tab("access", "Access"));
+  return h("div", { class: "subtabs onelake-tabs" }, tab("catalog", "Catalog"),
+    preview("shortcuts", tab("shortcuts", "Shortcuts")), preview("access", tab("access", "Access")),
+    h("span", { class: "spacer" }), learnMore("onelake"));
 }
 
 async function renderOneLake() {
+  if (!previewShown()) catalogPage.tab = "catalog";
   if (catalogPage.tab === "shortcuts") return renderShortcuts();
   if (catalogPage.tab === "access") return renderAccess();
   const cp = catalogPage;
@@ -1028,6 +1041,7 @@ async function renderOneLake() {
 }
 
 function openLakehouse(ref) {
+  markDone("lakehouse");
   state.lakehouseView = ref;
   state.openWorkspace = { id: ref.workspace_id, displayName: ref.workspace_name };
   go("lakehouse");
@@ -1583,11 +1597,12 @@ function computeMenu(nb) {
   return [
     { info: "Where Run all runs this notebook." },
     option("local", "This PC (no Fabric capacity used)", "desktop"),
-    option("fabric", `Fabric${nb.lakehouse ? ` (${publishWorkspaceName(nb)})` : " (attach a lakehouse first)"}`, "cloud"),
+    previewShown() || where.choice === "fabric"
+      ? option("fabric", `Fabric${nb.lakehouse ? ` (${publishWorkspaceName(nb)})` : " (attach a lakehouse first)"} · Preview`, "cloud") : null,
     option("default", `Same as ${env} (${where.envFabric ? "Fabric" : "this PC"})`, "sync"),
     { info: `Python ${state.python || "3"} on this PC. Fabric runs publish the notebook first.` },
     { label: "Restart kernel", icon: "restart", action: restartKernel },
-  ];
+  ].filter(Boolean);
 }
 
 async function setNotebookCompute(value) {
@@ -1928,21 +1943,56 @@ function markdown(src) {
   return wrap;
 }
 
+// ---------- pages ----------
+
+// The core pages, in rail order. Pages from other files register themselves the same way
+// (meta.js, settings.js); features.js has the rules.
+registerFeature({ id: "home", rail: { label: "Home", icon: "home", order: 10 }, views: { home: renderHome } });
+registerFeature({
+  id: "create", rail: { label: "Create", icon: "create", order: 20 }, views: { create: renderCreate },
+  commands: [
+    { label: "New notebook", icon: "notebook", keywords: "create python", run: () => newNotebook() },
+    { label: "New lakehouse", icon: "lakehouse", keywords: "create", run: () => newLakehouse() },
+  ],
+});
+registerFeature({
+  id: "workspaces", rail: { label: "Workspaces", icon: "workspaces", order: 30, also: ["workspace", "lakehouse", "query"] },
+  views: { workspaces: renderWorkspaces, workspace: renderWorkspace, lakehouse: renderLakehouse, query: renderQuery },
+});
+registerFeature({
+  id: "onelake", rail: { label: "OneLake", icon: "onelake", order: 40 }, views: { onelake: renderOneLake },
+  commands: [
+    { label: "OneLake catalog", icon: "onelake", keywords: "find tables items", run: () => { catalogPage.tab = "catalog"; go("onelake"); } },
+    { label: "OneLake shortcuts", icon: "copyArrowRight", keywords: "link", preview: true, run: () => { catalogPage.tab = "shortcuts"; go("onelake"); } },
+    { label: "OneLake access", icon: "shield", keywords: "permissions roles security", preview: true, run: () => { catalogPage.tab = "access"; go("onelake"); } },
+  ],
+});
+registerFeature({ id: "fabric", rail: { label: "Fabric", icon: "cloud", order: 60 }, views: { fabric: renderFabric } });
+registerFeature({
+  id: "monitor", rail: { label: "Monitor", icon: "monitor", order: 70 }, views: { monitor: renderMonitor },
+  commands: [
+    { label: "Runs", icon: "monitor", keywords: "monitor history failed", run: () => { monitorPage.panel = "runs"; go("monitor"); } },
+    { label: "Schedules", icon: "history", keywords: "monitor scheduled", preview: true, run: () => { monitorPage.panel = "schedules"; go("monitor"); } },
+    { label: "Cost", icon: "gauge", keywords: "monitor capacity cu spend", preview: true, run: () => { monitorPage.panel = "cost"; go("monitor"); } },
+  ],
+});
+
 // ---------- startup ----------
 
-document.querySelectorAll("#rail .rail-item[data-view]").forEach((el) => {
-  el.addEventListener("click", () => go(el.dataset.view));
-});
 document.getElementById("bell").addEventListener("click", () => toggleTray());
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && activity.open && !document.getElementById("dialog-root").childElementCount) toggleTray(false); });
-document.getElementById("account").addEventListener("click", (e) => {
-  if (!state.user) { signIn().then((ok) => ok && render()); return; }
-  showMenu(e.currentTarget, [{ info: `Signed in as ${state.user}` }, { info: `Fabric Desktop build ${state.build || "unknown"}` }]);
+document.getElementById("account").addEventListener("click", (e) => accountMenu(e.currentTarget));
+// The top bar's box opens the command bar; clearing it removes the page filter.
+const searchBox = document.getElementById("search");
+searchBox.addEventListener("keydown", (e) => {
+  if (e.key.length === 1 || e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); openPalette(e.key.length === 1 ? e.key : ""); }
 });
-document.getElementById("search").addEventListener("input", (e) => {
-  state.query = e.target.value;
-  if (state.view === "notebook" || state.view === "create" || state.view === "lakehouse" || state.view === "query") state.view = "home";
-  render();
+searchBox.addEventListener("mousedown", (e) => { if (!state.query) { e.preventDefault(); openPalette(); } });
+searchBox.addEventListener("input", () => {
+  if (!searchBox.value && state.query) { state.query = ""; render(); }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
 });
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && state.view === "notebook") {
@@ -1989,6 +2039,8 @@ async function checkComponents(afterInstall = false) {
   const set = (key, status, detail) => {
     rows[key].dataset.status = status;
     rows[key].lastChild.textContent = detail;
+    if (status === "busy" || status === "error") show();
+    if (status === "warn") logActivity({ status: "info", title: "Update check", text: detail });
   };
   const log = h("pre", { class: "startup-log", hidden: true });
   const help = h("div", { class: "startup-help", hidden: true });
@@ -1997,11 +2049,21 @@ async function checkComponents(afterInstall = false) {
     btn(label, null, () => { actions.replaceChildren(); resolve(i); }, i === 0 ? "tool primary" : "tool outline"))));
   const listen = (fn) => window.__TAURI__.event.listen("component-log", (e) => fn(e.payload));
 
-  document.getElementById("dialog-root").replaceChildren(h("div", { class: "overlay" },
+  // Shown only when something is updating or wrong, or the check takes more than a moment;
+  // a normal start goes straight to Home.
+  const dialog = h("div", { class: "overlay" },
     h("div", { class: "dialog", role: "dialog", "aria-label": "Checking components" },
       h("div", { class: "dialog-head" }, "Checking components"),
       h("div", { class: "startup-rows" }, row("app", "Fabric Desktop"), row("python", "Python"), row("sidecar", "Local engine")),
-      help, log, actions)));
+      help, log, actions));
+  let dialogShown = false;
+  function show() {
+    if (dialogShown) return;
+    dialogShown = true;
+    clearTimeout(slow);
+    document.getElementById("dialog-root").replaceChildren(dialog);
+  }
+  const slow = setTimeout(show, 2500);
 
   let report;
   try {
@@ -2014,6 +2076,8 @@ async function checkComponents(afterInstall = false) {
     return closeDialog();
   }
   const { app, sidecar, latest } = report;
+  state.commit = app.commit;
+  state.release = latest;
 
   if (report.bundled) {
     set("python", report.python ? "ok" : "skip", report.python ? `${report.python}, part of the engine` : "Comes with the engine");
@@ -2028,7 +2092,7 @@ async function checkComponents(afterInstall = false) {
   else if (app.updated_to && app.updated_to !== app.commit) {
     set("app", "error", `The update didn't take: this is still build ${short(app.commit)}, not ${short(app.updated_to)}. ` +
       "Download fabric-desktop.exe again from the latest release.");
-  } else if (!latest.commit) set("app", "warn", `Build ${short(app.commit)}. Could not check for a newer build (${latest.error}).`);
+  } else if (!latest.commit) set("app", "warn", `Build ${short(app.commit)} (${latest.channel || "stable"} channel). Could not check for a newer build: ${latest.error}`);
   else if (latest.commit === app.commit) set("app", "ok", `Up to date (build ${short(app.commit)})`);
   else {
     // A newer build is installed straight away, so nobody keeps running an old one.
@@ -2111,7 +2175,8 @@ async function checkComponents(afterInstall = false) {
   if (Object.values(rows).some((r) => r.dataset.status === "error")) {
     if (await choose("Retry", "Continue anyway") === 0) return checkComponents();
   }
-  closeDialog();
+  clearTimeout(slow);
+  closeDialog();  // also an earlier attempt's, after Retry
 }
 
 hydrateIcons();
@@ -2124,6 +2189,8 @@ checkComponents().finally(() => {
     state.python = env.python;
     state.user = env.user;
     state.tenant = env.tenant;
+    await loadSettings();
+    showWhatsNew();
     // The environment pill needs the metadata project; there may not be one yet.
     state.meta.project = await rpc("meta_project").catch(() => state.meta.project);
     render();

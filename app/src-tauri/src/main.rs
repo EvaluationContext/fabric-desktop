@@ -20,10 +20,37 @@ const UPDATER: &str = include_str!("updater.py");
 /// The main commit this exe was built from; empty for local builds, which skip updates.
 const BUILD_COMMIT: &str = env!("FABRIC_BUILD_COMMIT");
 
+/// The app (client) ID CI built in; the sidecar uses it unless policy or Settings name another.
+const BUILTIN_CLIENT_ID: &str = env!("FABRIC_BUILTIN_CLIENT_ID");
+
+/// Reads one key of a settings file; None when the file or key is missing.
+fn setting(path: PathBuf, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+    value.get(key)?.as_str().map(str::to_owned)
+}
+
+/// The release this PC updates from: "stable" or "latest" (the Preview channel). The
+/// organization's policy file wins over the Settings page, as in the sidecar's app_settings.py.
+fn release_tag() -> &'static str {
+    let policy = std::env::var_os("ProgramData").map(|d| PathBuf::from(d).join("FabricDesktop").join("policy.json"));
+    let user = data_dir().join("app-settings.json");
+    for path in policy.into_iter().chain([user]) {
+        match setting(path, "channel").as_deref() {
+            Some("preview") => return "latest",
+            Some("stable") => return "stable",
+            _ => {}
+        }
+    }
+    "stable"
+}
+
 /// Where release builds get their engine: Python with the sidecar and every package it
 /// needs, built and (once a certificate is set up) code-signed by CI, so the PC's own
 /// Python and its unsigned packages are not involved.
-const ENGINE_URL: &str = "https://github.com/KratosDataGod/fabric-desktop/releases/download/latest/fabric-desktop-engine.zip";
+fn engine_url() -> String {
+    format!("https://github.com/KratosDataGod/fabric-desktop/releases/download/{}/fabric-desktop-engine.zip", release_tag())
+}
 
 /// Release builds run the bundled engine; local builds, and anyone who sets
 /// FABRIC_DESKTOP_PYTHON, use a Python of their own with the sidecar pip-installed.
@@ -136,6 +163,7 @@ impl Sidecar {
         let stderr = std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
         let mut cmd = Command::new(python());
         cmd.args(["-m", "fabric_desktop.server"])
+            .env("FABRIC_DESKTOP_BUILTIN_CLIENT_ID", BUILTIN_CLIENT_ID)
             .current_dir(data_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -301,7 +329,7 @@ fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
     let mut curl = Command::new("curl.exe");
     curl.args(["-L", "--fail", "-sS", "-H", "Cache-Control: no-cache", "-o"])
         .arg(&zip)
-        .arg(format!("{ENGINE_URL}?nocache={nocache}"));
+        .arg(format!("{}?nocache={nocache}", engine_url()));
     run_tool(curl, "download the engine")?;
 
     say("Unpacking the engine…");
@@ -544,6 +572,20 @@ mod signin {
             .collect()
     }
 
+    /// Forgets the saved sign-in and signs the open view out (Sign out in the account menu).
+    pub fn forget(app: &tauri::AppHandle) {
+        let _ = std::fs::remove_file(file());
+        *LAST.lock().unwrap() = Vec::new();
+        if let Some(view) = app.get_webview(super::FABRIC_VIEW) {
+            for cookie in view.cookies().unwrap_or_default() {
+                if cookie.domain().is_some_and(super::fabric_host) {
+                    let _ = view.delete_cookie(cookie);
+                }
+            }
+            let _ = view.hide();
+        }
+    }
+
     pub fn load() -> Vec<Cookie<'static>> {
         let Ok(sealed) = std::fs::read(file()) else { return Vec::new() };
         match dpapi::unprotect(&sealed) {
@@ -744,6 +786,37 @@ async fn fabric_view_action(app: tauri::AppHandle, action: String, page: Option<
     }
 }
 
+/// Signs the Fabric view out and forgets its saved sign-in; the sidecar forgets its own.
+#[tauri::command]
+async fn fabric_view_sign_out(app: tauri::AppHandle) -> Result<(), String> {
+    signin::forget(&app);
+    Ok(())
+}
+
+/// Opens a link from Settings or Help in the default browser: https only, or a mailto: address
+/// for an organization's support contact.
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    let url = Url::parse(&url).map_err(|e| e.to_string())?;
+    match url.scheme() {
+        "https" => open_in_browser(&url),
+        "mailto" => {
+            let mut cmd = if cfg!(windows) {
+                let mut c = Command::new("rundll32");
+                c.args(["url.dll,FileProtocolHandler", url.as_str()]);
+                c
+            } else {
+                let mut c = Command::new("xdg-open");
+                c.arg(url.as_str());
+                c
+            };
+            hide_window(&mut cmd);
+            cmd.spawn().map(|_| ()).map_err(|e| format!("Could not open the mail app: {e}"))
+        }
+        other => Err(format!("Not opening a {other} link")),
+    }
+}
+
 /// Opens one of this repository's docs pages in the default browser, such as
 /// "xray-fixes.md#small-files". Only pages under docs/ on GitHub.
 #[tauri::command]
@@ -768,7 +841,7 @@ fn main() {
         .manage(SidecarState { sidecar: Mutex::new(None), child: Mutex::new(None) })
         .invoke_handler(tauri::generate_handler![
             rpc, stop_kernel, check_components, update_sidecar, update_app,
-            fabric_view_show, fabric_view_hide, fabric_view_action, open_doc
+            fabric_view_show, fabric_view_hide, fabric_view_action, open_doc, fabric_view_sign_out, open_link
         ])
         .run(tauri::generate_context!())
         .expect("error while running Fabric Desktop");

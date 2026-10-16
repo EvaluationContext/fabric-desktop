@@ -37,7 +37,7 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 | --- | --- |
 | `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake I/O, notebook kernel, SQL engine, metadata framework, job runner and the JSON-lines server |
 | `app/` | Tauri 2 shell (`src-tauri/`) and the Fabric-style UI (`ui/`, plain HTML and JavaScript). The shell starts the sidecar and forwards UI actions to it |
-| `docs/` | Architecture overview and diagram, agent guide, enterprise roadmap, and the KratosBI logo files (`docs/brand/`) |
+| `docs/` | [User guide](docs/user-guide.md), [UI guidelines](docs/ui-guidelines.md) for adding features, architecture overview and diagram, agent guide, enterprise roadmap, and the KratosBI logo files (`docs/brand/`) |
 | `deploy/` | Headless agent packaging: example `agent.toml`, systemd unit and Dockerfile (`linux/`), and the Windows install script (`windows/`) |
 | `examples/` | Sample jobs (`sales_by_region.toml` for DuckDB, `top_products.toml` for Polars) and sample data |
 
@@ -49,7 +49,8 @@ In short:
 
 1. Register an app with the redirect URI `http://localhost` (Mobile and desktop applications).
 2. Make sure your tenant has a service principal for each API (Azure Storage, Microsoft Graph, Power BI Service, and any optional ones).
-3. Add the delegated permissions from the table, grant admin consent, and set the app's id for your user: `setx FABRIC_DESKTOP_CLIENT_ID <client-id>`.
+3. Add the delegated permissions from the table and grant admin consent.
+4. Give the app's id to Fabric Desktop: paste it in **Settings > Account**, or for everyone set the repository variable `FABRIC_CLIENT_ID` or push a policy file ([Rolling out to your organization](docs/permissions.md#rolling-out-to-your-organization)).
 
 The headless agent needs no API permissions; it needs a Fabric tenant setting and workspace roles, listed on the same page.
 
@@ -66,11 +67,11 @@ fabric-desktop run ..\examples\sales_by_region.toml   # set workspace_id in the 
 
 ### Desktop app
 
-Download [fabric-desktop.exe](https://github.com/KratosDataGod/fabric-desktop/releases/download/latest/fabric-desktop.exe) from the **Releases** section of the repository page and double-click it. Every green build of `main` replaces it with a fresh copy. Windows SmartScreen may warn while the exe is not signed; choose **More info > Run anyway**. The app brings its own engine (Python plus the sidecar and its packages) in `%LOCALAPPDATA%\FabricDesktop\engine`, so the PC needs no Python. To run the sidecar with a Python of your own instead, set `FABRIC_DESKTOP_PYTHON` to its full path and pip-install the sidecar there.
+Download [fabric-desktop.exe](https://github.com/KratosDataGod/fabric-desktop/releases/download/stable/fabric-desktop.exe) from the **Releases** section of the repository page and double-click it. There are two update channels: **Stable** (the default) moves only when someone runs the **Promote to stable** workflow, and **Preview** gets every green build of `main` (the `latest` release). People pick theirs in **Settings > Updates**. Windows SmartScreen may warn while the exe is not signed; choose **More info > Run anyway**. The app brings its own engine (Python plus the sidecar and its packages) in `%LOCALAPPDATA%\FabricDesktop\engine`, so the PC needs no Python. To run the sidecar with a Python of your own instead, set `FABRIC_DESKTOP_PYTHON` to its full path and pip-install the sidecar there.
 
-Each time it starts, the app checks its components before anything else runs:
+Each time it starts, the app checks its components before anything else runs. The check only shows a window when something is updating or needs attention:
 
-- **Fabric Desktop:** if a newer build has been released, it downloads it straight away, checks the file really is that build, replaces the exe in place and restarts. The account menu shows which build is running.
+- **Fabric Desktop:** if a newer build has been released on this PC's channel, it downloads it straight away, checks the file really is that build, replaces the exe in place and restarts. The account menu shows which build is running.
 - **Local engine:** the engine built from the same commit as the exe, so the two always match. A missing or older engine is downloaded from the release (`fabric-desktop-engine.zip`) and unpacked automatically. With `FABRIC_DESKTOP_PYTHON` set, the sidecar is pip-installed into that Python instead (it must be 3.11 or later), and an editable (`pip install -e`) install is left alone.
 - **Blocked by Windows:** if Smart App Control or an organization's App Control policy refuses the engine's DLLs, the check names the blocked packages and says what to do instead of reinstalling.
 

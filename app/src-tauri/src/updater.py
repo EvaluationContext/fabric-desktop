@@ -2,7 +2,8 @@
 
 Uses only the standard library, because it must work before the sidecar is installed.
 
-    check            print one JSON object describing Python, the sidecar (and whether it starts) and the latest release;
+    check            print one JSON object describing Python, the sidecar (and whether it starts) and the newest
+                     release on this PC's update channel;
                      a build already seen to start is not started again, since loading its packages is slow
     install-sidecar  pip install the sidecar from the given commit, streaming pip's output
     download-app     download the latest release exe to a path, printing "progress <percent>" lines;
@@ -18,15 +19,41 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 REPO = "KratosDataGod/fabric-desktop"
-RELEASE = f"https://github.com/{REPO}/releases/download/latest"
 MIN_PYTHON = (3, 11)
-API = f"https://api.github.com/repos/{REPO}/releases/tags/latest"
+# Each update channel is a GitHub release: "latest" is replaced by every green build of main,
+# "stable" only when someone promotes a build (the Promote to stable workflow).
+CHANNEL_TAGS = {"stable": "stable", "preview": "latest"}
 COMMIT = re.compile(r"/archive/([0-9a-f]{40})\.zip")
 SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def _settings(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def channel() -> str:
+    """This PC's update channel: the organization's policy file wins over the Settings page.
+    The same rule as the sidecar's app_settings.py; this file can't import it."""
+    policy = Path(os.environ.get("ProgramData") or "/etc") / "FabricDesktop" / "policy.json"
+    user = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "FabricDesktop" / "app-settings.json"
+    for path in (policy, user):
+        value = _settings(path).get("channel")
+        if value in CHANNEL_TAGS:
+            return value
+    return "stable"
+
+
+def release_url(name: str = "") -> str:
+    return f"https://github.com/{REPO}/releases/download/{CHANNEL_TAGS[name or channel()]}"
 
 
 def sidecar_url(commit: str) -> str:
@@ -184,26 +211,24 @@ def _get(url: str, timeout: int = 5):
 
 
 def latest_release() -> dict:
-    """Commit of the newest published exe.
+    """Commit and notes of the newest exe on this PC's channel, from the release's version.json.
 
-    The GitHub API answers first (the release targets the commit it was built from);
-    version.json in the release is the fallback when the API is rate limited.
+    A release download, unlike GitHub's API, has no hourly limit per network address, which
+    matters when a whole office shares one.
     """
-    errors = []
+    name = channel()
     try:
-        with _get(API) as resp:
-            commit = json.load(resp).get("target_commitish", "")
-        if SHA.fullmatch(commit):
-            return {"commit": commit, "error": None}
-        errors.append(f"release targets {commit!r}, not a commit")
-    except Exception as exc:  # offline or rate limited
-        errors.append(f"{type(exc).__name__}: {exc}")
-    try:
-        with _get(f"{RELEASE}/version.json?nocache={int(time.time())}") as resp:
-            return {"commit": json.load(resp).get("commit"), "error": None}
-    except Exception as exc:  # offline, or a release from before version.json existed
-        errors.append(f"{type(exc).__name__}: {exc}")
-    return {"commit": None, "error": "; ".join(errors)}
+        with _get(f"{release_url(name)}/version.json?nocache={int(time.time())}") as resp:
+            info = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        error = "There is no stable release yet." if exc.code == 404 and name == "stable" else f"HTTPError: {exc}"
+        return {"commit": None, "error": error, "channel": name, "notes": ""}
+    except Exception as exc:  # offline
+        return {"commit": None, "error": f"{type(exc).__name__}: {exc}", "channel": name, "notes": ""}
+    commit = info.get("commit") or ""
+    if not SHA.fullmatch(commit):
+        return {"commit": None, "error": f"the release names {commit!r}, not a commit", "channel": name, "notes": ""}
+    return {"commit": commit, "error": None, "channel": name, "notes": str(info.get("notes") or "")}
 
 
 def check() -> dict:
@@ -256,7 +281,7 @@ def download_app(dest: str, commit: str = "") -> int:
     """Download the latest exe. With a commit, check the file is that build, since each
     exe carries its commit; a stale cached copy is fetched once more, then refused."""
     for attempt in range(2):
-        url = f"{RELEASE}/fabric-desktop.exe" + (f"?nocache={int(time.time())}" if attempt else "")
+        url = f"{release_url()}/fabric-desktop.exe" + (f"?nocache={int(time.time())}" if attempt else "")
         with _get(url, timeout=30) as resp, open(dest, "wb") as out:
             total = int(resp.headers.get("Content-Length") or 0)
             done, last = 0, -1
