@@ -104,7 +104,7 @@ Every key is optional. `channel` is `stable` or `preview`; `support_url` is an `
 
 **People from more than one organization.** Make the app registration **multitenant** (**Authentication > Supported account types > Accounts in any organizational directory**). Each organization's Microsoft Entra admin then approves it once by opening the admin approval link: `https://login.microsoftonline.com/organizations/adminconsent?client_id=<application-client-id>`. **Settings > Account > Admin approval** copies that link, so people can send it to their admin themselves.
 
-**Updates.** Every green build of `main` goes to the Preview channel at once. The Stable channel, which everyone gets by default, only moves when someone runs **Actions > Promote to stable** with the notes people will see as What's new. Run it once before launch so Stable has a build.
+**Updates.** Every green build of `main` goes to the Preview channel at once. The Stable channel, which everyone gets by default, only moves when someone runs **Actions > Promote to stable** with the notes people will see as What's new. Until the first promote, people on Stable follow Preview, so run it once before launch.
 
 ## The headless agent
 
