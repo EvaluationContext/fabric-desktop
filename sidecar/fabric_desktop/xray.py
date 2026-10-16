@@ -8,6 +8,7 @@ cost of runs this app started. Each finding says what is wrong, why it matters a
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -118,8 +119,14 @@ class Scanner:
 
     def __init__(self, fabric: Any, files: Callable[[str, str, str], list[dict[str, Any]]],
                  health: Callable[[str, str, str | None, str], dict[str, Any]],
-                 progress: Callable[[dict[str, Any]], None] = lambda _p: None, workers: int = 8):
+                 progress: Callable[[dict[str, Any]], None] = lambda _p: None, workers: int = 8,
+                 gate: threading.Event | None = None):
         self.fabric, self.files, self.health, self.progress, self.workers = fabric, files, health, progress, workers
+        # Cleared to pause: every worker waits here before its next call to Fabric or OneLake.
+        if gate is None:
+            gate = threading.Event()
+            gate.set()
+        self.gate = gate
 
     def _tables(self, lh: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
         """Every folder under Tables that is or should be a table, and whether Files has anything."""
@@ -144,6 +151,7 @@ class Scanner:
         skipped: list[str] = []
 
         def lakehouses(ws: dict[str, str]) -> list[dict[str, Any]]:
+            self.gate.wait()
             try:
                 ws["assignments"] = self.fabric.list_role_assignments(ws["id"])
             except Exception:
@@ -165,6 +173,7 @@ class Scanner:
             done = [0]
 
             def read(t: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+                self.gate.wait()
                 try:
                     h = self.health(t["workspace_id"], t["lakehouse_id"], t["schema"], t["table"])
                 except Exception as exc:
@@ -202,6 +211,7 @@ class Scanner:
                 "findings": rank(findings)}
 
     def _safe_tables(self, lh: dict[str, Any], skipped: list[str]) -> tuple[list[dict[str, Any]], bool]:
+        self.gate.wait()
         try:
             return self._tables(lh)
         except Exception:

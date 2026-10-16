@@ -14,7 +14,7 @@ from typing import Any
 
 import pyarrow.csv as pa_csv
 
-from .auth import ADMIN_SCOPES, EXECUTE_SCOPES, Authenticator
+from .auth import ADMIN_SCOPES, CAPACITY_SCOPES, EXECUTE_SCOPES, Authenticator
 from .fabric_api import FabricClient
 from . import lakehouse, sql
 from .jobs import Job, run_local
@@ -93,7 +93,14 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin, ScheduleMixin, X
 
     def list_capacities(self) -> list[dict[str, Any]]:
         """Capacities a new workspace can go on, active ones first."""
-        caps = self.fabric.list_capacities()
+        try:
+            caps = FabricClient(lambda: self.auth._token(CAPACITY_SCOPES)).list_capacities()
+        except Exception as exc:
+            if "InsufficientScopes" in str(exc) or "AADSTS65001" in str(exc):
+                raise PermissionError(
+                    "Listing capacities needs the Capacity.Read.All permission (Power BI Service, delegated) on the app's "
+                    "Entra registration. Add it, grant consent, and sign in again; docs/permissions.md has the steps.") from exc
+            raise
         return sorted(caps, key=lambda c: (c.get("state") != "Active", c.get("displayName", "").lower()))
 
     def catalog(self, all_types: bool = False) -> dict[str, Any]:
@@ -128,7 +135,7 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin, ScheduleMixin, X
                     if row["type"] == "Lakehouse":
                         row["lakehouse_id"] = it["id"]
                     items.append(row)
-        return {"workspaces": [{"id": w["id"], "displayName": w["displayName"]} for w in workspaces],
+        return {"workspaces": [{"id": w["id"], "displayName": w["displayName"], "type": w.get("type", "Workspace")} for w in workspaces],
                 "items": items, "skipped": skipped, "favorites": sorted(self._favorites())}
 
     def catalog_tables(self, lakehouses: list[dict[str, str]]) -> dict[str, Any]:

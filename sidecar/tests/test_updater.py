@@ -15,6 +15,11 @@ updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
 
 
+@pytest.fixture(autouse=True)
+def verified_in_tmp(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater, "verified_path", lambda: tmp_path / "engine-verified.json")
+
+
 class FakeDist:
     def __init__(self, direct_url):
         self.version = "0.2.0"
@@ -150,7 +155,7 @@ def test_check_reports_python(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["python_ok"] is True
     assert report["latest"]["commit"] == SHA
-    assert set(report["sidecar"]) == {"version", "commit", "editable", "error", "blocked"}
+    assert set(report["sidecar"]) == {"version", "commit", "editable", "error", "blocked", "cached"}
     assert report["sidecar"]["error"] is None
 
 
@@ -215,3 +220,35 @@ def test_installed_sidecar_reads_the_bundled_engines_build(monkeypatch, tmp_path
     monkeypatch.setattr(updater.sys, "executable", str(tmp_path / "python.exe"))
     monkeypatch.setattr(metadata, "distribution", lambda name: FakeDist({"url": "file:///D:/a/wheels/x.whl"}))
     assert updater.installed_sidecar()["commit"] == SHA
+
+
+def test_check_skips_starting_a_build_that_started_before(monkeypatch):
+    monkeypatch.setattr(updater, "latest_release", lambda: {"commit": SHA, "error": None})
+    monkeypatch.setattr(updater, "installed_sidecar", lambda: {"version": "0.9.0", "commit": SHA, "editable": False})
+    starts = []
+    monkeypatch.setattr(updater, "load_error", lambda: starts.append(1))
+    first, second = updater.check(), updater.check()
+    assert len(starts) == 1
+    assert first["sidecar"]["cached"] is False and second["sidecar"]["cached"] is True
+    assert second["sidecar"]["error"] is None
+
+
+def test_check_starts_again_after_a_new_build_or_a_failure(monkeypatch):
+    monkeypatch.setattr(updater, "latest_release", lambda: {"commit": SHA, "error": None})
+    build = {"version": "0.9.0", "commit": SHA, "editable": False}
+    monkeypatch.setattr(updater, "installed_sidecar", lambda: dict(build))
+    errors = ["ImportError: DLL load failed"]
+    monkeypatch.setattr(updater, "load_error", lambda: errors.pop() if errors else None)
+    assert updater.check()["sidecar"]["error"]  # a failure is never remembered
+    assert updater.check()["sidecar"]["cached"] is False
+    build["commit"] = "f" * 40
+    assert updater.check()["sidecar"]["cached"] is False
+
+
+def test_check_always_starts_a_developer_install(monkeypatch):
+    monkeypatch.setattr(updater, "latest_release", lambda: {"commit": SHA, "error": None})
+    monkeypatch.setattr(updater, "installed_sidecar", lambda: {"version": "0.9.0", "commit": None, "editable": True})
+    starts = []
+    monkeypatch.setattr(updater, "load_error", lambda: starts.append(1))
+    updater.check(), updater.check()
+    assert len(starts) == 2
