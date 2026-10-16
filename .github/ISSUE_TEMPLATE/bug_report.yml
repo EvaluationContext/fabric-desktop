@@ -1,0 +1,42 @@
+name: Report a problem
+description: Something in Fabric Desktop is broken or doesn't work as the docs say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Report a problem** in the app (account menu) copies a report with your build and recent errors. Paste it below.
+
+        This is **public**. Don't include tenant names, workspace or item IDs, data, connection strings or passwords. Ideas and feature requests go to the [Ideas forum](https://github.com/KratosDataGod/fabric-desktop/discussions/categories/ideas) instead.
+
+        Common problems and their fixes: [docs/troubleshooting.md](https://github.com/KratosDataGod/fabric-desktop/blob/main/docs/troubleshooting.md)
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Report from the app
+      description: Paste what Report a problem copied (build, channel, page and recent errors).
+      render: text
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a notebook
+        2. Attach a lakehouse
+        3. Run ...
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Update channel
+      options:
+        - Stable
+        - Preview
+        - Built from source
+        - Not sure
