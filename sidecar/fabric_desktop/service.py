@@ -16,7 +16,7 @@ import pyarrow.csv as pa_csv
 
 from .auth import ADMIN_SCOPES, CAPACITY_SCOPES, EXECUTE_SCOPES, Authenticator
 from .fabric_api import FabricClient
-from . import lakehouse, sql
+from . import app_settings, lakehouse, sql
 from .jobs import Job, run_local
 from .cloud_service import CloudMixin
 from .fabric_run import compute_check
@@ -38,7 +38,7 @@ def data_dir() -> Path:
 class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin, ScheduleMixin, XRayMixin):
     def __init__(self, client_id: str | None = None, root: Path | None = None, headless: bool = False):
         self.headless = headless  # a scheduled run: never open a sign-in window
-        self._client_id = client_id or os.environ.get("FABRIC_DESKTOP_CLIENT_ID", "")
+        self._client_id = client_id  # given by the agent; otherwise from app settings
         self.root = root or data_dir()
         self._auth: Authenticator | None = None
         self.kernel = Kernel(token=self._token_for, load_notebook=lambda name: self.notebooks.load(name)["cells"],
@@ -52,8 +52,10 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin, ScheduleMixin, X
 
     @property
     def auth(self) -> Authenticator:
-        if self._auth is None:
-            self._auth = Authenticator(self._client_id, interactive=not self.headless)
+        # The app ID can change on the Settings page; a new one needs a new sign-in.
+        client_id = self._client_id or app_settings.value("client_id")
+        if self._auth is None or getattr(self._auth, "client_id", client_id) != client_id:
+            self._auth = Authenticator(client_id, interactive=not self.headless)
         return self._auth
 
     @property
@@ -79,6 +81,23 @@ class Service(MetaMixin, CloudMixin, DataOpsMixin, EstateMixin, ScheduleMixin, X
         except Exception:  # no client ID yet, or offline: the UI offers sign-in
             pass
         return {"python": platform.python_version(), "user": user, "tenant": tenant}
+
+    def app_settings(self) -> dict[str, Any]:
+        return {**app_settings.load(), "policy_file": str(app_settings.policy_path())}
+
+    def save_app_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
+        app_settings.save(changes)
+        return self.app_settings()
+
+    def sign_out(self) -> dict[str, Any]:
+        """Forgets this PC's sign-in. Scheduled runs on this PC stop until someone signs in again."""
+        try:
+            self.auth.sign_out()
+        except ValueError:  # no app ID, so nobody was signed in
+            pass
+        self._tables = None
+        self._endorse = None
+        return {"user": None}
 
     def sign_in(self) -> dict[str, Any]:
         self.auth.fabric_token()

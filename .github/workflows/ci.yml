@@ -62,7 +62,8 @@ jobs:
           Set-Content "$dir\python312._pth" "python312.zip`r`n.`r`nLib\site-packages`r`nimport site" -Encoding ascii
           python -m pip wheel --no-deps -w "$env:RUNNER_TEMP\wheels" ./sidecar
           python -m pip install --only-binary=:all: --target "$dir\Lib\site-packages" pip (Get-ChildItem "$env:RUNNER_TEMP\wheels\*.whl").FullName
-          @{ commit = "$env:GITHUB_SHA"; python = "$env:PYTHON_VERSION" } | ConvertTo-Json | Set-Content "$dir\engine.json" -Encoding ascii
+          # client_id: the app people sign in with unless their organization sets another (repository variable).
+          @{ commit = "$env:GITHUB_SHA"; python = "$env:PYTHON_VERSION"; client_id = "${{ vars.FABRIC_CLIENT_ID }}" } | ConvertTo-Json | Set-Content "$dir\engine.json" -Encoding ascii
           "ENGINE_DIR=$dir" >> $env:GITHUB_ENV
       - name: Check the engine starts on its own
         shell: pwsh
@@ -112,6 +113,7 @@ jobs:
         env:
           # Builds of main carry their commit, so the app can tell when a newer release exists.
           FABRIC_RELEASE_COMMIT: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || '' }}
+          FABRIC_CLIENT_ID: ${{ vars.FABRIC_CLIENT_ID }}
       - name: Sign the exe
         if: vars.TRUSTED_SIGNING_ACCOUNT != ''
         uses: azure/trusted-signing-action@v0
@@ -133,7 +135,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Every green build of main replaces the "latest" release with the new exe.
+    # Every green build of main replaces the "latest" release (the Preview channel) with the new
+    # exe. People on the Stable channel only move when the Promote to stable workflow runs.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [sidecar, engine, shell]
     runs-on: ubuntu-latest
@@ -150,9 +153,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          echo "{\"commit\": \"$GITHUB_SHA\"}" > version.json
+          # What's new for Preview: the pull request's title (a merge commit's body), else the commit subject.
+          NOTES=$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA" --jq '.commit.message' | awk 'NR==1{s=$0} NR>2&&!b&&NF{b=$0} END{print (s ~ /^Merge pull request/ && b) ? b : s}')
+          jq -n --arg commit "$GITHUB_SHA" --arg notes "$NOTES" '{commit: $commit, notes: $notes}' > version.json
           gh release delete latest --cleanup-tag --yes || true
           gh release create latest fabric-desktop.exe fabric-desktop-engine.zip version.json \
             --title "Fabric Desktop (latest build)" \
             --notes "Built automatically from ${GITHUB_SHA::7} on main. Download fabric-desktop.exe and double-click it." \
-            --target "$GITHUB_SHA"
+            --target "$GITHUB_SHA" \
+            --prerelease

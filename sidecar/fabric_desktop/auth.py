@@ -42,7 +42,9 @@ def default_cache_path() -> Path:
 class Authenticator:
     def __init__(self, client_id: str, cache_path: Path | None = None, interactive: bool = True):
         if not client_id:
-            raise ValueError("A Microsoft Entra app (client) ID is required; set FABRIC_DESKTOP_CLIENT_ID.")
+            raise ValueError("Fabric Desktop doesn't know which app to sign in with yet. Open Settings > Account "
+                             "and paste the app (client) ID your Fabric admin gave you.")
+        self.client_id = client_id
         self.cache_path = cache_path or default_cache_path()
         self.interactive = interactive  # False for scheduled runs: nobody is there to sign in
         self.cache = msal.SerializableTokenCache()
@@ -82,6 +84,11 @@ class Authenticator:
 
     def storage_token(self) -> str:
         return self._token(STORAGE_SCOPES)
+
+    def sign_out(self) -> None:
+        for account in self.app.get_accounts():
+            self.app.remove_account(account)
+        self._save()
 
     def signed_in_user(self) -> str | None:
         accounts = self.app.get_accounts()

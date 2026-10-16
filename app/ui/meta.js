@@ -68,6 +68,19 @@ async function loadMetaProject() {
   return p;
 }
 
+// Metadata's tabs, in four groups so new metadata features join a group instead of a long row.
+// [group id, label, [[tab id, label, preview feature id]]]
+const META_TAB_GROUPS = [
+  ["design", "Design", [["entities", "Entities"], ["layers", "Layers"], ["keys", "Surrogate keys"], ["sources", "Source systems"]]],
+  ["runs", "Runs", [["runs", "Runs"]]],
+  ["quality", "Quality", [["tests", "Tests", "tests"], ["health", "Table health", "health"]]],
+  ["deploy", "Deploy", [["environments", "Environments and promote"], ["model", "Semantic model", "model"]]],
+];
+
+function metaGroupOf(tab) {
+  return META_TAB_GROUPS.find(([, , tabs]) => tabs.some(([id]) => id === tab)) || META_TAB_GROUPS[0];
+}
+
 function goMeta(tab) {
   state.meta.tab = tab || state.meta.tab;
   go("metadata");
@@ -80,25 +93,34 @@ async function renderMetadata() {
   const p = await loadMetaProject();
   if (state.view !== "metadata" || !p) return;
   if (!p.path) return renderMetaSetup(p);
+  renderEnvBar();  // the top bar's environment picker waits for the project
   const m = state.meta;
-  const tabs = [["entities", "Entities"], ["layers", "Layers"], ["keys", "Surrogate keys"], ["sources", "Source systems"],
-    ["runs", "Runs"], ["health", "Table health"], ["model", "Semantic model"], ["tests", "Tests"], ["environments", "Environments and promote"]];
+  // A hidden preview tab falls back to its group's first tab.
+  const visible = (tabs) => tabs.filter(([, , previewId]) => !previewId || previewShown());
+  if (!visible(metaGroupOf(m.tab)[2]).some(([id]) => id === m.tab)) m.tab = visible(metaGroupOf(m.tab)[2])[0]?.[0] || "entities";
+  const group = metaGroupOf(m.tab);
+  const tabLabel = (label, previewId) => {
+    const node = h("span", {}, label);
+    return previewId ? preview(previewId, node) : node;
+  };
   const body = h("div", { class: "meta-body" });
   setView(h("div", { class: "page" },
     h("div", { class: "page-head" },
       h("div", {},
         h("h1", {}, "Metadata"),
         h("p", { class: "sub" }, "Every table is a file in ", h("span", { class: "mono" }, p.path),
-          ". Metadata version ", h("span", { class: "mono" }, p.version), ".")),
+          ". Metadata version ", h("span", { class: "mono" }, p.version), ". ", learnMore("metadata"))),
       h("div", { class: "head-actions" },
         btn("New entity", "add", newEntityDialog, "tool outline"),
-        btn("Schedule", "history", () => scheduleMetaRuns(m.env), "tool outline",
-          { title: `Run every entity in ${ENV_LABEL[m.env]} on a schedule, on this PC or in Fabric` }),
+        preview("schedules", btn("Schedule", "history", () => scheduleMetaRuns(m.env), "tool outline",
+          { title: `Run every entity in ${ENV_LABEL[m.env]} on a schedule, on this PC or in Fabric` })),
         btn(inFabric(p, m.env) ? "Run all in Fabric" : "Run all", "play", () => runEntities(null), "tool primary",
           { disabled: p.errors.length ? true : null }))),
     problemsBanner(p.errors),
-    h("div", { class: "subtabs" }, tabs.map(([id, label]) =>
-      h("button", { class: `tab${m.tab === id ? " active" : ""}`, onclick: () => goMeta(id) }, label))),
+    h("div", { class: "subtabs meta-groups" }, META_TAB_GROUPS.filter(([, , tabs]) => visible(tabs).length).map(([id, label, tabs]) =>
+      h("button", { class: `tab${group[0] === id ? " active" : ""}`, onclick: () => goMeta(visible(tabs)[0][0]) }, label))),
+    visible(group[2]).length > 1 ? h("div", { class: "seg meta-tabs", role: "group", "aria-label": group[1] }, visible(group[2]).map(([id, label, previewId]) =>
+      h("button", { class: m.tab === id ? "on" : null, onclick: () => goMeta(id) }, tabLabel(label, previewId)))) : null,
     body));
   const render = { entities: renderEntitiesTab, layers: renderLayersTab, keys: renderKeysTab, sources: renderSourcesTab,
     runs: renderRunsTab, health: renderHealthTab, model: renderModelTab, tests: renderTestsTab, environments: renderEnvTab }[m.tab];
@@ -248,7 +270,7 @@ async function renderEntity() {
   const e = await metaCall("meta_entity", { name, env: state.meta.env });
   if (state.view !== "entity" || !e) return;
   state.meta.entity = e;
-  if (!state.meta.project) await loadMetaProject();
+  if (!state.meta.project) { await loadMetaProject(); renderEnvBar(); }
   const editor = h("textarea", { class: "toml", id: "entity-toml", spellcheck: "false" });
   editor.value = e.text;
   const dirty = () => editor.value !== e.text;
@@ -298,7 +320,7 @@ async function renderEntity() {
         }, "tool outline"),
         btn("Profile", "dataBarVertical", () => profileEntity(e.name), "tool outline"),
         btn("Compare", "flow", () => compareDialog(e.name), "tool outline"),
-        btn("History", "history", () => historyDialog(e.name), "tool outline", { title: "Every version of the table; restore an earlier one" }),
+        preview("history", btn("History", "history", () => historyDialog(e.name), "tool outline", { title: "Every version of the table; restore an earlier one" })),
         btn("Rebuild with downstream", "sync", () => runEntities([e.name], { cascade: true }), "tool outline"),
         btn(inFabric(state.meta.project, state.meta.env) ? `Run in Fabric (${ENV_LABEL[state.meta.env]})` : `Run in ${ENV_LABEL[state.meta.env]}`, "play",
           () => (dirty() ? save() : Promise.resolve()).then(() => runEntities([e.name])), "tool primary"))),
@@ -610,8 +632,8 @@ function computeChoice(env, local, fabric) {
     onclick: on ? null : () => setCompute(env, value),
   }, label);
   return h("div", { class: "compute-row" }, h("span", { class: "muted-text small" }, "Runs on"),
-    h("div", { class: "seg" }, option("local", "This PC", !fabric), option("fabric", "Fabric", fabric)),
-    btn("Schedules", "history", () => scheduleMetaRuns(env), "tool link small"));
+    h("div", { class: "seg" }, option("local", "This PC", !fabric), preview("fabricRun", option("fabric", "Fabric", fabric)) || (fabric ? option("fabric", "Fabric", fabric) : null)),
+    preview("schedules", btn("Schedules", "history", () => scheduleMetaRuns(env), "tool link small")));
 }
 
 async function setCompute(env, compute) {
@@ -912,7 +934,18 @@ async function renderSourcesTab(body) {
     h("div", { class: "sources-grid" }, list, form), varlibCard()].filter(Boolean));
 }
 
-window.META_VIEWS = { metadata: renderMetadata, entity: renderEntity };
+registerFeature({
+  id: "metadata", rail: { label: "Metadata", icon: "metadata", order: 50, also: ["entity"] },
+  views: { metadata: renderMetadata, entity: renderEntity },
+  commands: [
+    ...META_TAB_GROUPS.flatMap(([, , tabs]) => tabs.map(([id, label, previewId]) => ({
+      label: `Metadata: ${label}`, icon: "metadata", keywords: "medallion", preview: !!previewId, run: () => goMeta(id) }))),
+    { label: "New entity", icon: "add", keywords: "metadata table create", run: () => { goMeta("entities"); newEntityDialog(); },
+      when: () => !!state.meta?.project?.path },
+    { label: "Run all entities", icon: "play", keywords: "metadata run", run: () => { goMeta("runs"); runEntities(null); },
+      when: () => !!state.meta?.project?.path },
+  ],
+});
 
 // ---------- table health ----------
 

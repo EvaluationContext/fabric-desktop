@@ -87,18 +87,47 @@ def test_latest_release_offline(monkeypatch):
     assert result["commit"] is None and "no network" in result["error"]
 
 
-def test_latest_release_asks_the_api_without_caches(monkeypatch):
-    seen = serve(monkeypatch, {"api.github.com": json.dumps({"target_commitish": SHA}).encode()})
-    assert updater.latest_release() == {"commit": SHA, "error": None}
-    assert seen == [(updater.API, "no-cache")]
+@pytest.fixture
+def settings_dirs(monkeypatch, tmp_path):
+    """Empty policy and user settings folders, returned as (policy file, user file)."""
+    monkeypatch.setenv("ProgramData", str(tmp_path / "pd"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    policy, user = tmp_path / "pd" / "FabricDesktop" / "policy.json", tmp_path / "la" / "FabricDesktop" / "app-settings.json"
+    policy.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    return policy, user
 
 
-def test_latest_release_falls_back_to_version_json(monkeypatch):
-    other = "f" * 40
-    seen = serve(monkeypatch, {"api.github.com": OSError("rate limited"),
-                               "version.json": json.dumps({"commit": other}).encode()})
-    assert updater.latest_release() == {"commit": other, "error": None}
-    assert "nocache=" in seen[1][0]
+def test_channel_defaults_to_stable_and_policy_wins(settings_dirs):
+    policy, user = settings_dirs
+    assert updater.channel() == "stable"
+    user.write_text(json.dumps({"channel": "preview"}))
+    assert updater.channel() == "preview"
+    policy.write_text(json.dumps({"channel": "stable"}))
+    assert updater.channel() == "stable"
+    policy.write_text(json.dumps({"channel": "nightly"}))  # not a channel: ignored
+    assert updater.channel() == "preview"
+
+
+def test_latest_release_reads_the_channels_version_json(monkeypatch, settings_dirs):
+    seen = serve(monkeypatch, {"/stable/version.json": json.dumps({"commit": SHA, "notes": "Settings page"}).encode()})
+    assert updater.latest_release() == {"commit": SHA, "error": None, "channel": "stable", "notes": "Settings page"}
+    assert "nocache=" in seen[0][0] and seen[0][1] == "no-cache"
+    assert not any("api.github.com" in url for url, _ in seen)
+
+
+def test_preview_channel_follows_latest(monkeypatch, settings_dirs):
+    settings_dirs[1].write_text(json.dumps({"channel": "preview"}))
+    seen = serve(monkeypatch, {"/latest/version.json": json.dumps({"commit": SHA}).encode()})
+    assert updater.latest_release()["commit"] == SHA
+    assert "/releases/download/latest/" in seen[0][0]
+
+
+def test_no_stable_release_yet(monkeypatch, settings_dirs):
+    import urllib.error
+    serve(monkeypatch, {"version.json": urllib.error.HTTPError("u", 404, "Not Found", {}, None)})
+    result = updater.latest_release()
+    assert result["commit"] is None and result["error"] == "There is no stable release yet."
 
 
 def test_download_app_checks_the_build(monkeypatch, tmp_path):

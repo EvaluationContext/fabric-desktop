@@ -80,7 +80,7 @@ function renderNotebook() {
   const toolbars = {
     home: [runAllBtn, cancelBtn, computeBtn, h("div", { class: "sep" }), btn("Add data items", "lakehouse", openDataItems),
       h("div", { class: "spacer" }), btn("Save", "save", saveNotebook),
-      btn("Schedule", "history", scheduleNotebook, "tool"),
+      preview("schedules", btn("Schedule", "history", scheduleNotebook, "tool")),
       h("div", { class: "split" }, btn("Publish to OneLake", "publish", publishNotebook, "tool primary",
         { title: nb.workspace?.workspace_id ? `Publish to ${nb.workspace.workspace_name}` : "Publish to a Fabric workspace you pick" }),
       h("button", { class: "tool primary split-more", "aria-label": "Publish options", title: "Publish options",
@@ -98,7 +98,7 @@ function renderNotebook() {
       btn("Run all above", "up", runAbove, "tool", localOnlyAttrs({ disabled: busy, "data-run": true })),
       btn("Run cell and below", "down", runBelow, "tool", localOnlyAttrs({ disabled: busy, "data-run": true })), cancelBtn, computeBtn, h("div", { class: "sep" }),
       btn("Restart kernel", "restart", restartKernel), btn("Restart and run all", "restart", async () => { await restartKernel(); runAll(); }, "tool", localOnlyAttrs({ disabled: busy, "data-run": true })),
-      h("div", { class: "sep" }), btn("Schedule", "history", scheduleNotebook)],
+      h("div", { class: "sep" }), preview("schedules", btn("Schedule", "history", scheduleNotebook))],
     view: [toggleBtn("Explorer", "panel", state.showExplorer, () => { state.showExplorer = !state.showExplorer; renderNotebook(); }),
       toggleBtn("Outline", "documentTable", state.showExplorer && state.explorerTab === "outline", () => {
         const on = state.showExplorer && state.explorerTab === "outline";
@@ -1184,3 +1184,5 @@ async function restartKernel() {
     if (state.view === "notebook") renderNotebook();
   }
 }
+
+registerFeature({ id: "notebook", views: { notebook: renderNotebook } });

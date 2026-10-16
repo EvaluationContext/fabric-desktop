@@ -43,11 +43,7 @@ In the Entra admin center: **App registrations > your app > API permissions > Ad
 2. **Make sure your tenant has every API.** Do this before adding permissions; see [the next section](#could-not-grant-admin-consent-your-organization-does-not-have-a-subscription-or-service-principal). It's the step that usually goes wrong.
 3. **Add the permissions** in the table, top to bottom.
 4. **Grant admin consent.** **Grant admin consent for <your tenant>** on the API permissions page. You need Global Administrator, Privileged Role Administrator or Cloud Application Administrator. Without it, each user consents for themselves at first sign-in, if your tenant allows that.
-5. **Give the app's id to Fabric Desktop.** Copy the **Application (client) ID** and set it for your Windows user, then restart the app:
-
-   ```powershell
-   setx FABRIC_DESKTOP_CLIENT_ID <application-client-id>
-   ```
+5. **Give the app's id to Fabric Desktop.** Copy the **Application (client) ID**. For just yourself, paste it in **Settings > Account > App (client) ID** (or the setup box at first sign-in). For everyone, see [Rolling out to your organization](#rolling-out-to-your-organization).
 
 6. **Sign in again** so your token carries the new permissions: close the app, delete `%LOCALAPPDATA%\FabricDesktop\msal_cache.bin`, and open it again. It asks you to sign in once. (Without this, the new permissions take effect within an hour, when the saved token is renewed.)
 
@@ -81,6 +77,34 @@ If you'd rather not add an API yet (for example Azure Key Vault or Azure Service
 ### When a feature says a permission is missing
 
 The app names the permission it needed in **Activity** (the bell) under Details. Find it in the table, add it, grant consent, and sign in again (step 6).
+
+## Rolling out to your organization
+
+Nobody should have to type an app ID or run a command. Pick one of these; the first one found wins, in this order:
+
+| Where | How | Best for |
+| --- | --- | --- |
+| Policy file | `%ProgramData%\FabricDesktop\policy.json`, pushed with Intune or Group Policy (see below) | IT-managed PCs. People see "Set by your organization" and can't change it |
+| `FABRIC_DESKTOP_CLIENT_ID` | An environment variable for the Windows user | Existing installs set up with `setx` |
+| Settings | **Settings > Account > App (client) ID**, or the setup box at first sign-in | One person or a pilot |
+| Built in | Repository variable `FABRIC_CLIENT_ID` (**Settings > Secrets and variables > Actions > Variables**); every build after that carries it | Everyone who downloads the app |
+
+`policy.json` can also fix the update channel, hide preview features, and say where **Report a problem** goes:
+
+```json
+{
+  "client_id": "00000000-0000-0000-0000-000000000000",
+  "channel": "stable",
+  "show_preview": false,
+  "support_url": "mailto:data-platform@contoso.com"
+}
+```
+
+Every key is optional. `channel` is `stable` or `preview`; `support_url` is an `https://` link (a Teams channel, a ticket form) or a `mailto:` address.
+
+**People from more than one organization.** Make the app registration **multitenant** (**Authentication > Supported account types > Accounts in any organizational directory**). Each organization's Microsoft Entra admin then approves it once by opening the admin approval link: `https://login.microsoftonline.com/organizations/adminconsent?client_id=<application-client-id>`. **Settings > Account > Admin approval** copies that link, so people can send it to their admin themselves.
+
+**Updates.** Every green build of `main` goes to the Preview channel at once. The Stable channel, which everyone gets by default, only moves when someone runs **Actions > Promote to stable** with the notes people will see as What's new. Run it once before launch so Stable has a build.
 
 ## The headless agent
 

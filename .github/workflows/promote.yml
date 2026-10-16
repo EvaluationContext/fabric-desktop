@@ -1,0 +1,32 @@
+# Moves the Stable channel to the build now on the Preview channel ("latest"). Everyone on
+# Stable (the default) updates to it at their next launch and sees these notes as What's new.
+name: Promote to stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "What's new, as people will read it after updating (one line per change)"
+        required: true
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          gh release download latest --pattern fabric-desktop.exe --pattern fabric-desktop-engine.zip --pattern version.json
+          COMMIT=$(jq -r .commit version.json)
+          echo "$COMMIT" | grep -Eq '^[0-9a-f]{40}$' || { echo "The latest release has no build commit"; exit 1; }
+          jq -n --arg commit "$COMMIT" --arg notes "$NOTES" '{commit: $commit, notes: $notes}' > version.json
+          gh release delete stable --cleanup-tag --yes || true
+          gh release create stable fabric-desktop.exe fabric-desktop-engine.zip version.json \
+            --title "Fabric Desktop (stable)" \
+            --notes "$NOTES" \
+            --target "$COMMIT" \
+            --latest
