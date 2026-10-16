@@ -1,0 +1,83 @@
+title: "Idea: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping shape Fabric Desktop. Before you post, please **search the Ideas** for the same problem. If it's there, upvote it and add your situation as a comment instead.
+
+        This forum is **public**. Don't include tenant names, workspace or item IDs, data, connection strings, or screenshots with data in them.
+
+        How ideas are voted on and prioritized: [docs/ideas.md](https://github.com/KratosDataGod/fabric-desktop/blob/main/docs/ideas.md)
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What were you trying to do, what got in the way, and what do you do today instead?
+      placeholder: When I promote Dev to Test I can't tell which tables will change, so I compare them by hand in a notebook first.
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Who it affects
+      description: Your role. Pick all that apply.
+      multiple: true
+      options:
+        - Data engineer
+        - Analyst or report builder
+        - Data scientist
+        - Team lead or project owner
+        - Fabric or IT admin
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often you hit it
+      options:
+        - Every day
+        - Every week
+        - Every month
+        - Rarely, but it hurts when it happens
+    validations:
+      required: true
+  - type: input
+    id: impact
+    attributes:
+      label: How much it costs you
+      description: Time lost, risk, or money, in your own words. Numbers help.
+      placeholder: About 2 hours a week for our team of 6
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area of the app
+      options:
+        - Install, sign-in or updates
+        - Home or Estate X-ray
+        - Workspaces or OneLake catalog
+        - OneLake shortcuts or access
+        - Notebooks
+        - SQL query
+        - "Metadata: entities, layers or runs"
+        - "Metadata: surrogate keys or source systems"
+        - "Metadata: quality, tests or table health"
+        - "Metadata: environments, promote or semantic model"
+        - Monitor, schedules or cost
+        - Settings or rolling out to an organization
+        - Headless agent
+        - Documentation
+        - Something new
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea (optional)
+      description: How you imagine it working. The problem above matters most; there may be another way to solve it.
+  - type: checkboxes
+    id: tester
+    attributes:
+      label: Early versions
+      options:
+        - label: I'd try an early (Preview) version of this and say how it went.

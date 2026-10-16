@@ -21,15 +21,29 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 
 ## Documentation
 
+**Start at the [documentation home](docs/README.md).** It says which guide to read for what you're doing, and what is tested and what isn't.
+
 | Document | What it covers |
 | --- | --- |
+| [docs/install.md](docs/install.md) | Installing on a PC: requirements, first start, Windows blocking the engine, updates and channels, where files live, uninstalling |
+| [docs/azure-setup.md](docs/azure-setup.md) | Configuring Azure and Fabric for an organization: tenant settings, the Entra app registration, consent, rolling out the app ID, workspaces, capacity and access |
+| [docs/permissions.md](docs/permissions.md) | Every Entra permission the app uses, in alphabetical order; setup steps; fixing admin consent errors; what the agent needs instead |
+| [docs/user-guide.md](docs/user-guide.md) | Every page of the app and how to use it |
+| [docs/notebooks.md](docs/notebooks.md) | Notebooks and SQL on your PC, Fabric code that works here, publishing, Run in Fabric and schedules |
+| [docs/metadata-guide.md](docs/metadata-guide.md) | The metadata framework from a new project to Prod, with a reference for every setting |
+| [docs/teams.md](docs/teams.md) | Working across teams: roles, Git workflow, environments, shared keys |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Each error message, what it means and what to do |
+| [docs/ideas.md](docs/ideas.md) | Submitting ideas to the public Ideas forum, voting, and how ideas are prioritized |
 | [docs/why-fabric-desktop.md](docs/why-fabric-desktop.md) | Why Fabric Desktop is needed: bringing Power BI's build-locally, deploy-to-the-cloud model to data engineering |
 | [docs/architecture.md](docs/architecture.md) | How the app, the sidecar and OneLake fit together |
-| [docs/permissions.md](docs/permissions.md) | Every Entra permission the app uses, in alphabetical order; setup steps; fixing admin consent errors; what the agent needs instead |
 | [docs/xray-fixes.md](docs/xray-fixes.md) | Each Estate X-ray finding: what it means, what the app's fix button does, and how to fix it by hand in Fabric |
 | [docs/agent.md](docs/agent.md) | The headless agent: identity setup, `agent.toml`, installing on Linux (systemd or container) and Windows, operating it, and what to verify on your tenant |
 | [docs/enterprise-roadmap.md](docs/enterprise-roadmap.md) | The enterprise local execution assessment: feature inventory, gap analysis, architecture changes, roadmap milestones M0 to M6 and work items |
+| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Where new features go in the UI |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Ideas, bug reports, and setting up to change the code |
 | [deploy/agent.example.toml](deploy/agent.example.toml) | Every agent setting, with comments |
+
+**Ideas and feature requests** go to the [Ideas forum](https://github.com/KratosDataGod/fabric-desktop/discussions/categories/ideas), where people vote on them. See [docs/ideas.md](docs/ideas.md).
 
 ## Layout
 
@@ -37,7 +51,7 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 | --- | --- |
 | `sidecar/` | Python package `fabric_desktop`: auth, Fabric REST client, OneLake I/O, notebook kernel, SQL engine, metadata framework, job runner and the JSON-lines server |
 | `app/` | Tauri 2 shell (`src-tauri/`) and the Fabric-style UI (`ui/`, plain HTML and JavaScript). The shell starts the sidecar and forwards UI actions to it |
-| `docs/` | [User guide](docs/user-guide.md), [UI guidelines](docs/ui-guidelines.md) for adding features, architecture overview and diagram, agent guide, enterprise roadmap, and the KratosBI logo files (`docs/brand/`) |
+| `docs/` | The [documentation](docs/README.md): install, Azure setup, user guide, notebooks, metadata, teams, troubleshooting and ideas guides, plus architecture, agent, roadmap and the KratosBI logo files (`docs/brand/`) |
 | `deploy/` | Headless agent packaging: example `agent.toml`, systemd unit and Dockerfile (`linux/`), and the Windows install script (`windows/`) |
 | `examples/` | Sample jobs (`sales_by_region.toml` for DuckDB, `top_products.toml` for Polars) and sample data |
 
@@ -266,4 +280,4 @@ Setup, every setting, and install steps for systemd, Docker and Windows are in [
 
 ## Not yet built
 
-An installer, and pipelines (the agent's pipeline hand-off is roadmap M4). From the metadata plan: per-step performance suggestions, re-pointing -1 facts when a late customer arrives, replaying quarantined rows, and running hook tests on promote. Source system connections are a table in `LH_Keys`, not yet a Fabric variable library item.
+An installer, and pipelines (the agent's pipeline hand-off is roadmap M4). From the metadata plan: per-step performance suggestions, and re-pointing -1 facts when a late customer arrives. Ideas for what comes next are collected in the [Ideas forum](docs/ideas.md).
