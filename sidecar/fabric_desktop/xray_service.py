@@ -73,30 +73,49 @@ class XRayMixin:
         except (FileNotFoundError, ValueError):
             return None
 
-    def xray(self, refresh: bool = False) -> dict[str, Any]:
-        """The last scan, and whether one is running ({"running": True, "progress": {...}})."""
+    _xray_gate: threading.Event | None = None
+
+    def xray(self, refresh: bool = False, auto: bool = False) -> dict[str, Any]:
+        """The last scan, and whether one is running ({"running": True, "progress": {...}}).
+
+        ``auto`` starts the first scan on this PC by itself, once ever; after that a scan
+        runs only when asked (``refresh``), so opening Home never starts one."""
+        if auto and not refresh and not self._xray_saved() and not self._settings().get("xray_auto_scanned"):  # type: ignore[attr-defined]
+            self._save_settings(xray_auto_scanned=True)  # type: ignore[attr-defined]
+            refresh = True
         with self._xray_lock:
             state = self._xray_state
             running = bool(state and state.get("running"))
             if refresh and not running:
                 fabric_token = self.auth.fabric_token()  # type: ignore[attr-defined]  # MSAL stays on this thread
                 storage_token = self.auth.storage_token()  # type: ignore[attr-defined]
-                self._xray_state = state = {"running": True, "progress": {"phase": "Starting", "done": 0, "total": 0}}
-                threading.Thread(target=self._xray_run, args=(fabric_token, storage_token), daemon=True).start()
+                self._xray_state = state = {"running": True, "paused": False, "progress": {"phase": "Starting", "done": 0, "total": 0}}
+                self._xray_gate = threading.Event()
+                self._xray_gate.set()
+                threading.Thread(target=self._xray_run, args=(fabric_token, storage_token, self._xray_gate), daemon=True).start()
                 running = True
         saved = self._xray_saved()
-        out: dict[str, Any] = {"running": running, "progress": (state or {}).get("progress"), "error": (state or {}).get("error"),
-                               "result": saved}
+        out: dict[str, Any] = {"running": running, "paused": bool(running and (state or {}).get("paused")),
+                               "progress": (state or {}).get("progress"), "error": (state or {}).get("error"), "result": saved}
         if saved:
             out["result"] = self._xray_annotate(saved)
         return out
+
+    def xray_pause(self, paused: bool = True) -> dict[str, Any]:
+        """Pause a running scan where it is (calls already under way finish), or carry on."""
+        with self._xray_lock:
+            state = self._xray_state
+            if state and state.get("running") and self._xray_gate is not None:
+                state["paused"] = bool(paused)
+                (self._xray_gate.clear if paused else self._xray_gate.set)()
+        return self.xray()
 
     def _xray_progress(self, p: dict[str, Any]) -> None:
         with self._xray_lock:
             if self._xray_state:
                 self._xray_state["progress"] = p
 
-    def _xray_run(self, fabric_token: str, storage_token: str) -> None:
+    def _xray_run(self, fabric_token: str, storage_token: str, gate: threading.Event | None = None) -> None:
         options = storage_options(storage_token)
         files = FileStore(lambda: storage_token)
 
@@ -104,7 +123,7 @@ class XRayMixin:
             ref = TableRef(ws, lh, schema or "dbo", table, flat=schema is None)
             return maintenance.health(ref.uri, options)
 
-        scanner = xray.Scanner(FabricClient(lambda: fabric_token), files.list, health, self._xray_progress)
+        scanner = xray.Scanner(FabricClient(lambda: fabric_token), files.list, health, self._xray_progress, gate=gate)
         try:
             result = scanner.scan()
             try:

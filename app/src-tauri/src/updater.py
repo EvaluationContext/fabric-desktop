@@ -2,7 +2,8 @@
 
 Uses only the standard library, because it must work before the sidecar is installed.
 
-    check            print one JSON object describing Python, the sidecar (and whether it starts) and the latest release
+    check            print one JSON object describing Python, the sidecar (and whether it starts) and the latest release;
+                     a build already seen to start is not started again, since loading its packages is slow
     install-sidecar  pip install the sidecar from the given commit, streaming pip's output
     download-app     download the latest release exe to a path, printing "progress <percent>" lines;
                      with a commit after the path, refuse a download that is another build
@@ -11,9 +12,11 @@ Uses only the standard library, because it must work before the sidecar is insta
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -49,6 +52,38 @@ def installed_sidecar() -> dict:
     if engine.is_file():
         commit = json.loads(engine.read_text()).get("commit") or commit
     return {"version": dist.version, "commit": commit, "editable": editable}
+
+
+def verified_path() -> Path:
+    """Where the check remembers the engine build it last saw start (the app's data folder)."""
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return Path(base) / "FabricDesktop" / "engine-verified.json"
+
+
+def _verified_key(sidecar: dict) -> dict:
+    return {"commit": sidecar.get("commit"), "version": sidecar.get("version"), "python": sys.executable}
+
+
+def already_verified(sidecar: dict) -> bool:
+    """True when this exact build, in this Python, started last time. The shell forgets it
+    whenever the sidecar exits unexpectedly, so a newly blocked or broken engine is checked again."""
+    if not sidecar.get("commit"):
+        return False
+    try:
+        return json.loads(verified_path().read_text()) == _verified_key(sidecar)
+    except (OSError, ValueError):
+        return False
+
+
+def remember_verified(sidecar: dict) -> None:
+    if not sidecar.get("commit"):
+        return
+    try:
+        path = verified_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_verified_key(sidecar)))
+    except OSError:
+        pass  # only a shortcut for next time
 
 
 def load_error() -> str | None:
@@ -141,7 +176,7 @@ def _blocked_files(probe) -> dict | None:
             "smart_app_control": sac, "location": str(dists[0].locate_file(""))}
 
 
-def _get(url: str, timeout: int = 10):
+def _get(url: str, timeout: int = 5):
     # Ask every cache on the way for a fresh copy: "latest" is replaced in place on each build.
     req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache",
                                                "User-Agent": "fabric-desktop-updater"})
@@ -174,8 +209,14 @@ def latest_release() -> dict:
 def check() -> dict:
     sidecar = installed_sidecar()
     if sidecar["version"]:
-        sidecar["error"] = load_error()
+        # Starting the engine's packages is the slow part of the check; skip it for a build
+        # that already started in this Python.
+        cached = already_verified(sidecar)
+        sidecar["error"] = None if cached else load_error()
         sidecar["blocked"] = blocked_files() if sidecar["error"] else None
+        sidecar["cached"] = cached
+        if not cached and not sidecar["error"]:
+            remember_verified(sidecar)
     return {
         "python": ".".join(map(str, sys.version_info[:3])),
         "python_ok": sys.version_info >= MIN_PYTHON,
@@ -206,6 +247,7 @@ def install_sidecar(commit: str) -> int:
             print("blocked " + json.dumps(blocked), flush=True)
         print(f"The local engine installed but does not start: {error}", flush=True)
         return 1
+    remember_verified(installed_sidecar())
     print("The local engine starts.", flush=True)
     return 0
 

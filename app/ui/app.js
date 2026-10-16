@@ -186,24 +186,28 @@ function renderChrome() {
   document.querySelectorAll("#rail .rail-item[data-view]").forEach((el) => {
     el.classList.toggle("active", el.dataset.view === (state.view === "entity" ? "metadata" : state.view));
   });
+  // Items opened recently, each with a close button.
   const open = [];
+  const recent = (view, iconName, label, onOpen, onClose) => h("div", { class: "rail-open-item" },
+    h("button", { class: `rail-item${state.view === view ? " active" : ""}`, onclick: onOpen }, icon(iconName, 22), label),
+    h("button", { class: "rail-close", title: `Close ${label}`, "aria-label": `Close ${label}`,
+      onclick: async (e) => {
+        e.stopPropagation();
+        await onClose();
+        if (state.view === view) go("home"); else renderChrome();
+      } }, icon("dismiss", 12)));
   if (state.openWorkspace) {
-    open.push(h("button", {
-      class: `rail-item${state.view === "workspace" ? " active" : ""}`,
-      onclick: () => openWorkspace(state.openWorkspace),
-    }, icon("workspace", 22), state.openWorkspace.displayName));
+    open.push(recent("workspace", "workspace", state.openWorkspace.displayName, () => openWorkspace(state.openWorkspace),
+      () => { state.openWorkspace = null; }));
   }
   if (sqlPage.ref) {
-    open.push(h("button", {
-      class: `rail-item${state.view === "query" ? " active" : ""}`,
-      onclick: () => go("query"),
-    }, icon("code", 22), "SQL query"));
+    open.push(recent("query", "code", "SQL query", () => go("query"), () => { sqlPage.ref = null; }));
   }
   if (state.notebook) {
-    open.push(h("button", {
-      class: `rail-item${state.view === "notebook" ? " active" : ""}`,
-      onclick: () => go("notebook"),
-    }, icon("notebook", 22), state.notebook.name));
+    open.push(recent("notebook", "notebook", state.notebook.name, () => go("notebook"), async () => {
+      if (state.notebook?.dirty) await saveNotebook();  // closing never loses edits
+      state.notebook = null;
+    }));
   }
   document.getElementById("rail-open").replaceChildren(...open);
 
@@ -250,8 +254,26 @@ function signInCallout() {
 
 // ---------- Home, Create, Monitor ----------
 
+// A section that folds to its header, remembered on this PC. head is what stays visible.
+function foldable(id, head, body, { cls = "card pad", always = null } = {}) {
+  let folded = false;
+  try { folded = localStorage.getItem(`fd.fold.${id}`) === "1"; } catch { /* unfolded */ }
+  const box = h("section", { class: `${cls} foldable${folded ? " folded" : ""}` });
+  const toggle = h("button", { class: "fold-toggle", "aria-expanded": String(!folded), title: folded ? "Show" : "Hide",
+    onclick: () => {
+      folded = !folded;
+      try { localStorage.setItem(`fd.fold.${id}`, folded ? "1" : "0"); } catch { /* this session only */ }
+      box.classList.toggle("folded", folded);
+      toggle.setAttribute("aria-expanded", String(!folded));
+      toggle.title = folded ? "Show" : "Hide";
+    } }, h("span", { class: "chev", "aria-hidden": "true" }, "▾"), head);
+  box.append(h("div", { class: "fold-head" }, toggle), ...(always ? [always] : []), h("div", { class: "fold-body" }, body));
+  return box;
+}
+
 // Home answers "what happened since I was last here": problems first, then what is running, what
-// runs next and each environment's state, then ways to start something.
+// runs next and each environment's state, then ways to start something. Each part draws as soon as
+// its own data is in, quickest first; the Estate X-ray reads only after all of them.
 async function renderHome() {
   const name = state.user ? state.user.split("@")[0] : "";
   const summary = h("p", { class: "sub" }, "Checking what ran...");
@@ -260,13 +282,13 @@ async function renderHome() {
   const upcoming = h("div", { class: "muted-text" }, "Loading...");
   const envCards = h("div", { class: "home-envs" });
   const list = h("div", { class: "muted-text" }, "Loading notebooks...");
+  const xray = xrayCard();
   setView(h("div", { class: "page home" },
     h("h1", {}, name ? `Welcome back, ${name}` : "Welcome to Fabric Desktop"),
     summary,
     signInCallout(),
     attention,
     h("div", { class: "home-attention", id: "home-fresh" }),
-    xrayCard(),
     h("div", { class: "home-two" },
       h("section", { class: "card pad" }, h("h2", {}, "Running now"), running),
       h("section", { class: "card pad" }, h("h2", {}, "Coming up"), upcoming)),
@@ -275,99 +297,123 @@ async function renderHome() {
       btn("New notebook", "notebook", newNotebook, "tool outline"),
       btn("New lakehouse", "lakehouse", () => newLakehouse(), "tool outline"),
       btn("OneLake catalog", "onelake", () => go("onelake"), "tool outline")),
-    h("section", {}, h("h2", {}, "Recent notebooks"), list)));
+    foldable("home.notebooks", h("h2", {}, "Recent notebooks"), list),
+    xray));
+  const onHome = () => state.view === "home";
 
-  const [meta, cloud, project, notebooks] = await Promise.all([
-    rpc("meta_runs_all", { limit: 300 }).catch(() => ({ runs: [], unavailable: {} })),
-    rpc("fabric_runs", { limit: 50, refresh: false }).catch(() => []),
-    rpc("meta_project").catch(() => null),
-    attempt(() => rpc("list_notebooks")),
-  ]);
-  if (state.view !== "home") return;
-  if (project) state.meta.project = project;
-  const hasProject = !!project?.path;
-
-  // The latest run of each table in each environment says how that table stands now.
-  const latest = new Map();
-  for (const r of meta.runs || []) {
-    const key = `${r.env}:${r.entity}`;
-    if (!latest.has(key)) latest.set(key, r);
-  }
-  const failing = [...latest.values()].filter((r) => r.status === "failed" || r.status === "needs_decision");
-  const cloudFailed = (cloud || []).filter((r) => r.status === "Failed" && Date.now() - new Date(r.started_at) < 86400000);
+  // What is running is already known in the app: no call needed.
   const live = activity.items.filter((i) => i.status === "running" && !i.stale);
-
-  const problems = failing.length + cloudFailed.length;
-  // Late tables (dataops.js) count too; they may arrive after the runs, so the line is redrawn then.
-  state.homeSummary = () => {
-    const late = (fresh.items || []).filter((x) => x.status === "late").length;
-    const total = problems + late;
-    summary.textContent = [
-      total ? `${total} ${total === 1 ? "thing needs" : "things need"} your attention` : "Nothing needs your attention",
-      live.length ? `${live.length} running` : "",
-    ].filter(Boolean).join(" · ") + ".";
-  };
-  state.homeSummary();
-  renderFreshHome();
-
-  attention.replaceChildren(problems ? [h("h2", {}, "Needs your attention"),
-    ...failing.slice(0, 5).map((r) => h("div", { class: "card attention" },
-      statusPill(r.status),
-      h("div", { class: "grow" },
-        h("div", {}, h("b", { class: "mono" }, r.entity), ` in ${ENV_LABEL[r.env]} · ${r.compute === "fabric" ? "in Fabric" : "on this PC"}`),
-        h("div", { class: "reason" }, runReason(r) || "Did not finish"),
-        h("div", { class: "muted-text small" }, when(r.started_at))),
-      btn("Open entity", null, () => { setGlobalEnv(r.env); openEntity(r.entity); }, "tool outline"),
-      btn("Open run", null, () => showRun(r.run_id, r.env), "tool primary"))),
-    ...cloudFailed.slice(0, 3).map((r) => h("div", { class: "card attention" },
-      statusPill("failed"),
-      h("div", { class: "grow" }, h("div", {}, h("b", {}, r.name), ` · ${r.kind} in Fabric`),
-        h("div", { class: "reason" }, r.message || "Failed in Fabric"), h("div", { class: "muted-text small" }, when(r.started_at))),
-      r.url ? btn("Open in Fabric", null, () => openInFabric(r.url), "tool primary") : null))] : []);
-
   running.replaceWith(live.length ? h("div", { class: "home-list" }, live.map((i) => h("div", { class: "home-item" },
     h("div", { class: "row" }, h("b", { class: "grow" }, i.title), h("span", { class: "muted-text small" }, `started ${relTime(i.at)}`)),
     h("div", { class: "progress" }, h("div", { class: "bar indeterminate" })),
     i.text ? h("div", { class: "muted-text small" }, i.text) : null)))
     : h("p", { class: "muted-text" }, "Nothing is running."));
 
-  envCards.replaceChildren(...Object.entries(ENV_LABEL).map(([env, label]) => {
-    const where = envWhere(project, env);
-    const runs = [...latest.values()].filter((r) => r.env === env);
-    const failed = runs.filter((r) => r.status === "failed" || r.status === "needs_decision").length;
-    const last = (meta.runs || []).find((r) => r.env === env);
-    const busy = live.some((i) => i.env === env);
-    const [cls, text] = busy ? ["info", "Running"] : meta.unavailable?.[env] ? ["neu", "Not checked"]
-      : !runs.length ? ["neu", "Never run"] : failed ? ["fail", `${failed} failed`] : ["pass", "All green"];
-    return h("button", { class: "card env-tile", onclick: () => { setGlobalEnv(env); goMeta("runs"); } },
-      h("div", { class: "row" }, h("b", { class: "grow" }, label), h("span", { class: `pill-s ${cls}` }, text)),
-      h("div", { class: "muted-text small" }, hasProject ? where.short : "No metadata project yet"),
-      h("div", { class: "muted-text small" }, meta.unavailable?.[env] || (last ? ["Last run ", when(last.started_at)] : "")));
-  }));
+  // The sidecar answers one call at a time, so the quick local ones go first.
+  const notebooksDone = rpc("list_notebooks").catch(() => null).then((notebooks) => {
+    if (!onHome()) return;
+    const shown = (notebooks || []).filter((n) => matches(n.name)).slice(0, 8);
+    list.replaceWith(shown.length ? h("table", { class: "list" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Modified"))),
+      h("tbody", {}, shown.map((n) => h("tr", { class: "click", onclick: () => openNotebook(n.name) },
+        h("td", {}, h("span", { class: "item" }, icon("notebook", 18), n.name)),
+        h("td", {}, when(new Date(n.modified * 1000).toISOString())))))) : h("p", { class: "muted-text" },
+      notebooks === null ? "Couldn't list notebooks." : state.query ? "No notebooks match your search." : "No notebooks yet. Create one to get started."));
+  });
+  const projectCall = rpc("meta_project").catch(() => null);
+  const cloudCall = rpc("fabric_runs", { limit: 50, refresh: false }).catch(() => []);
+  const pcCall = rpc("pc_schedules_for", { kind: "all" }).catch(() => []);
+  const metaCall = rpc("meta_runs_all", { limit: 300 }).catch(() => ({ runs: [], unavailable: {} }));
 
-  // This PC's schedules are local; Fabric's are read only when signed in, after the rest is on screen.
-  const fabricEnvs = hasProject && state.user ? Object.keys(ENV_LABEL).filter((env) => envWhere(project, env).fabric) : [];
-  const [pcList, ...lists] = await Promise.all([rpc("pc_schedules_for", { kind: "all" }).catch(() => []),
-    ...fabricEnvs.map((env) => rpc("meta_schedules", { env }).catch(() => null))]);
-  if (state.view !== "home") return;
-  const items = [
-    ...(pcList || []).filter((sc) => sc.enabled && sc.next_run).sort((a, b) => a.next_run.localeCompare(b.next_run))
-      .map((sc) => ({ what: sc.label, where: "This PC", text: nextRunText(sc.next_run) })),
-    ...lists.flatMap((res, i) => (res?.schedules || []).filter((sc) => sc.enabled)
-      .map((sc) => ({ what: `Run all · ${ENV_LABEL[fabricEnvs[i]]}`, where: "Fabric", text: sc.text }))),
-  ].slice(0, 6);
-  upcoming.replaceWith(h("div", {}, items.length ? h("div", { class: "home-list" }, items.map((x) => h("div", { class: "home-item row" },
-    h("span", { class: "grow" }, x.what, h("span", { class: "muted-text small" }, ` · ${x.where}`)), h("span", { class: "muted-text small" }, x.text))))
-    : h("p", { class: "muted-text" }, "Nothing scheduled. Use Schedule on a notebook or on Metadata, on this PC or in Fabric."),
-    btn("All schedules", "history", () => { monitorPage.panel = "schedules"; go("monitor"); }, "tool link small")));
+  // Coming up: this PC's schedules straight away, Fabric's added once read (only when signed in).
+  const upcomingDone = (async () => {
+    const [project, pcList] = await Promise.all([projectCall, pcCall]);
+    if (!onHome()) return;
+    const draw = (lists, fabricEnvs) => {
+      const items = [
+        ...(pcList || []).filter((sc) => sc.enabled && sc.next_run).sort((a, b) => a.next_run.localeCompare(b.next_run))
+          .map((sc) => ({ what: sc.label, where: "This PC", text: nextRunText(sc.next_run) })),
+        ...lists.flatMap((res, i) => (res?.schedules || []).filter((sc) => sc.enabled)
+          .map((sc) => ({ what: `Run all · ${ENV_LABEL[fabricEnvs[i]]}`, where: "Fabric", text: sc.text }))),
+      ].slice(0, 6);
+      const next = h("div", {}, items.length ? h("div", { class: "home-list" }, items.map((x) => h("div", { class: "home-item row" },
+        h("span", { class: "grow" }, x.what, h("span", { class: "muted-text small" }, ` · ${x.where}`)), h("span", { class: "muted-text small" }, x.text))))
+        : h("p", { class: "muted-text" }, "Nothing scheduled. Use Schedule on a notebook or on Metadata, on this PC or in Fabric."),
+        btn("All schedules", "history", () => { monitorPage.panel = "schedules"; go("monitor"); }, "tool link small"));
+      upcoming.replaceWith(next);
+      return next;
+    };
+    let shown = draw([], []);
+    const fabricEnvs = project?.path && state.user ? Object.keys(ENV_LABEL).filter((env) => envWhere(project, env).fabric) : [];
+    if (!fabricEnvs.length) return;
+    await metaCall;  // Fabric's schedules come after the run history, which fills more of the page
+    const lists = await Promise.all(fabricEnvs.map((env) => rpc("meta_schedules", { env }).catch(() => null)));
+    if (!onHome()) return;
+    const next = draw(lists, fabricEnvs);
+    shown.replaceWith(next);
+  })();
 
-  const shown = (notebooks || []).filter((n) => matches(n.name)).slice(0, 8);
-  list.replaceWith(shown.length ? h("table", { class: "list" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Modified"))),
-    h("tbody", {}, shown.map((n) => h("tr", { class: "click", onclick: () => openNotebook(n.name) },
-      h("td", {}, h("span", { class: "item" }, icon("notebook", 18), n.name)),
-      h("td", {}, when(new Date(n.modified * 1000).toISOString())))))) : h("p", { class: "muted-text" },
-    state.query ? "No notebooks match your search." : "No notebooks yet. Create one to get started."));
+  const runsDone = (async () => {
+    const [meta, cloud, project] = await Promise.all([metaCall, cloudCall, projectCall]);
+    if (!onHome()) return;
+    if (project) state.meta.project = project;
+    const hasProject = !!project?.path;
+
+    // The latest run of each table in each environment says how that table stands now.
+    const latest = new Map();
+    for (const r of meta.runs || []) {
+      const key = `${r.env}:${r.entity}`;
+      if (!latest.has(key)) latest.set(key, r);
+    }
+    const failing = [...latest.values()].filter((r) => r.status === "failed" || r.status === "needs_decision");
+    const cloudFailed = (cloud || []).filter((r) => r.status === "Failed" && Date.now() - new Date(r.started_at) < 86400000);
+
+    const problems = failing.length + cloudFailed.length;
+    // Late tables (dataops.js) count too; they may arrive after the runs, so the line is redrawn then.
+    state.homeSummary = () => {
+      const late = (fresh.items || []).filter((x) => x.status === "late").length;
+      const total = problems + late;
+      summary.textContent = [
+        total ? `${total} ${total === 1 ? "thing needs" : "things need"} your attention` : "Nothing needs your attention",
+        live.length ? `${live.length} running` : "",
+      ].filter(Boolean).join(" · ") + ".";
+    };
+    state.homeSummary();
+    renderFreshHome();
+
+    attention.replaceChildren(...(problems ? [h("h2", {}, "Needs your attention"),
+      ...failing.slice(0, 5).map((r) => h("div", { class: "card attention" },
+        statusPill(r.status),
+        h("div", { class: "grow" },
+          h("div", {}, h("b", { class: "mono" }, r.entity), ` in ${ENV_LABEL[r.env]} · ${r.compute === "fabric" ? "in Fabric" : "on this PC"}`),
+          h("div", { class: "reason" }, runReason(r) || "Did not finish"),
+          h("div", { class: "muted-text small" }, when(r.started_at))),
+        btn("Open entity", null, () => { setGlobalEnv(r.env); openEntity(r.entity); }, "tool outline"),
+        btn("Open run", null, () => showRun(r.run_id, r.env), "tool primary"))),
+      ...cloudFailed.slice(0, 3).map((r) => h("div", { class: "card attention" },
+        statusPill("failed"),
+        h("div", { class: "grow" }, h("div", {}, h("b", {}, r.name), ` · ${r.kind} in Fabric`),
+          h("div", { class: "reason" }, r.message || "Failed in Fabric"), h("div", { class: "muted-text small" }, when(r.started_at))),
+        r.url ? btn("Open in Fabric", null, () => openInFabric(r.url), "tool primary") : null))] : []));
+
+    envCards.replaceChildren(...Object.entries(ENV_LABEL).map(([env, label]) => {
+      const where = envWhere(project, env);
+      const runs = [...latest.values()].filter((r) => r.env === env);
+      const failed = runs.filter((r) => r.status === "failed" || r.status === "needs_decision").length;
+      const last = (meta.runs || []).find((r) => r.env === env);
+      const busy = live.some((i) => i.env === env);
+      const [cls, text] = busy ? ["info", "Running"] : meta.unavailable?.[env] ? ["neu", "Not checked"]
+        : !runs.length ? ["neu", "Never run"] : failed ? ["fail", `${failed} failed`] : ["pass", "All green"];
+      return h("button", { class: "card env-tile", onclick: () => { setGlobalEnv(env); goMeta("runs"); } },
+        h("div", { class: "row" }, h("b", { class: "grow" }, label), h("span", { class: `pill-s ${cls}` }, text)),
+        h("div", { class: "muted-text small" }, hasProject ? where.short : "No metadata project yet"),
+        h("div", { class: "muted-text small" }, meta.unavailable?.[env] || (last ? ["Last run ", when(last.started_at)] : "")));
+    }));
+  })();
+
+  // The X-ray's saved scan is read last, so it never holds up the rest of Home.
+  await Promise.allSettled([notebooksDone, upcomingDone, runsDone]);
+  if (onHome() && xray.isConnected) loadXray(xray, false);
 }
 
 function tile(iconName, title, desc, onClick) {
@@ -500,7 +546,7 @@ function fabricStatus(status) {
 // over the slot's box. It is a native view, so it is hidden whenever the slot isn't showing or a
 // dialog is open over it. owner is the app view showing it; page is "monitor", "catalog" or a
 // Fabric item link.
-const fabricView = { slot: null, observer: null, frame: 0, owner: null, page: "monitor" };
+const fabricView = { slot: null, observer: null, frame: 0, owner: null, page: "monitor", force: false };
 
 function dockFabricView(slot, owner, page) {
   fabricView.observer?.disconnect();
@@ -522,7 +568,10 @@ function placeFabricView() {
     }
     const r = slot.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return;
-    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height, tenant: state.tenant || null, page: fabricView.page }).catch((err) => {
+    const force = fabricView.force;
+    fabricView.force = false;
+    invoke("fabric_view_show", { x: r.left, y: r.top, width: r.width, height: r.height, tenant: state.tenant || null,
+      page: fabricView.page, force }).catch((err) => {
       slot.replaceChildren(h("p", { class: "muted-text" }, `The Fabric view could not open: ${err}`));
     });
   });
@@ -636,7 +685,9 @@ const fabricPage = { page: FABRIC_HOME };
 
 function openInFabric(page) {
   fabricPage.page = page;
+  fabricView.force = true;  // a click always goes to its page, even the one shown last
   if (state.view === "fabric") {
+    fabricView.force = false;
     invoke("fabric_view_action", { action: "home", page }).catch(() => {});
   } else {
     go("fabric");
@@ -719,10 +770,14 @@ function itemIcon(type, size = 18) {
   return svg;
 }
 
-// Paths of item pages in the Fabric portal, by item type; other types open their workspace.
+// Paths of item pages in the Fabric portal, by item type; other types open their workspace,
+// since a wrong guess shows Fabric's "not found" page instead.
 const FABRIC_ITEM_PATHS = {
-  Lakehouse: "lakehouses", Warehouse: "datawarehouses", Notebook: "synapsenotebooks", SemanticModel: "datasets",
-  Report: "reports", PaginatedReport: "rdlreports", DataPipeline: "pipelines", Dashboard: "dashboards", Eventhouse: "eventhouses", KQLDatabase: "databases",
+  Lakehouse: "lakehouses", Warehouse: "datawarehouses", SQLEndpoint: "lakewarehouses", Notebook: "synapsenotebooks",
+  SparkJobDefinition: "sparkjobdefinitions", SemanticModel: "datasets", Report: "reports", PaginatedReport: "rdlreports",
+  DataPipeline: "pipelines", Dashboard: "dashboards", Datamart: "datamarts", Eventhouse: "eventhouses", KQLDatabase: "databases",
+  KQLQueryset: "queryworkbenches", KQLDashboard: "kustodashboards", Eventstream: "eventstreams", MirroredDatabase: "mirroreddatabases",
+  SQLDatabase: "sqldatabases", MLModel: "mlmodels", MLExperiment: "mlexperiments",
 };
 
 function fabricItemLink(r) {
@@ -741,7 +796,29 @@ async function pollSidecar(method, params, done, keepGoing) {
 }
 
 const catalogPage = { data: null, tables: null, layers: {}, scope: "all", type: "all", query: "",
-                      wsQuery: "", sort: "name", dir: 1, open: new Set(), tab: "catalog" };
+                      wsQuery: "", wsAll: false, sort: "name", dir: 1, open: new Set(), tab: "catalog", typeOpen: new Set() };
+
+// Item types grouped the way Fabric's OneLake catalog groups its Type filter. A type not listed
+// falls under Other types.
+const TYPE_GROUPS = [
+  ["data", "Data", "database", ["Lakehouse", "Warehouse", "WarehouseSnapshot", "SQLEndpoint", "SQLDatabase", "Datamart", "MirroredDatabase",
+    "MirroredWarehouse", "MirroredAzureDatabricksCatalog", "Eventhouse", "KQLDatabase", "SemanticModel"]],
+  ["insights", "Insights", "dataBarVertical", ["Report", "PaginatedReport", "Dashboard", "KQLDashboard", "KQLQueryset", "Scorecard"]],
+  ["processes", "Processes", "flow", ["Notebook", "SparkJobDefinition", "DataPipeline", "Dataflow", "CopyJob", "Eventstream", "Reflex",
+    "DataBuildToolJob", "MLExperiment", "UserDataFunction"]],
+  ["solutions", "Solutions", "apps", ["OrgApp", "App", "DataAgent", "MLModel", "GraphQLApi"]],
+  ["configurations", "Configurations", "boxToolbox", ["Environment", "VariableLibrary", "MountedDataFactory", "ApacheAirflowJob"]],
+];
+const TYPE_GROUP_OF = Object.fromEntries(TYPE_GROUPS.flatMap(([id, , , types]) => types.map((t) => [t, id])));
+const typeGroup = (type) => TYPE_GROUP_OF[type] || "other";
+// A click anywhere outside the open Type panel closes it.
+document.addEventListener("mousedown", (e) => {
+  if (catalogPage.typePanel && !e.target.closest?.(".type-filter")) {
+    catalogPage.typePanel = false;
+    document.querySelector(".type-panel")?.remove();
+  }
+});
+const TYPE_GROUP_LABEL = { ...Object.fromEntries(TYPE_GROUPS.map(([id, label]) => [id, label])), other: "Other types" };
 
 // The OneLake page's tabs: the catalog here; Shortcuts and Access are in estate.js.
 function onelakeTabs() {
@@ -777,8 +854,13 @@ async function renderOneLake() {
   const endorsed = () => state.endorsements?.items || {};
   const tablesOf = (r) => cp.tables?.[r.item_id] || [];
 
+  // cp.type is "all", a group ("g:data") or one item type ("Lakehouse").
+  const typeMatches = (r) => cp.type === "all" || (cp.type.startsWith("g:") ? typeGroup(r.type) === cp.type.slice(2) : r.type === cp.type);
+  const personal = () => new Set((cp.data?.workspaces || []).filter((w) => w.type === "Personal").map((w) => w.id));
+
   function inScope(r) {
     if (cp.scope === "fav") return favorites().has(key(r));
+    if (cp.scope === "mine") return personal().has(r.workspace_id);
     if (cp.scope === "endorsed") return !!endorsed()[key(r)];
     if (cp.scope.startsWith("ws:")) return r.workspace_id === cp.scope.slice(3);
     return true;
@@ -788,7 +870,7 @@ async function renderOneLake() {
 
   function shown() {
     const q = cp.query.toLowerCase();
-    return cp.data.items.filter((r) => inScope(r) && (cp.type === "all" || r.type === cp.type)
+    return cp.data.items.filter((r) => inScope(r) && typeMatches(r)
       && (!q || `${r.name} ${r.workspace_name} ${typeLabel(r.type)} ${r.description} ${tablesOf(r).join(" ")}`.toLowerCase().includes(q)))
       .sort((a, b) => cp.dir * String(sortValue[cp.sort](a)).localeCompare(String(sortValue[cp.sort](b)), undefined, { sensitivity: "base" }));
   }
@@ -799,11 +881,50 @@ async function renderOneLake() {
     if (result) { cp.data.favorites = result; draw(); }
   }
 
-  function scopeButton(scope, label, glyph, count, disabled, title) {
+  function scopeButton(scope, label, iconName, count, disabled, title) {
     return h("button", { class: `catalog-scope${cp.scope === scope ? " on" : ""}`, disabled, title,
       onclick: () => { cp.scope = scope; draw(); } },
-    h("span", { class: "glyph" }, glyph), h("span", { class: "label" }, label), h("span", { class: "count" }, count));
+    h("span", { class: "glyph" }, icon(iconName, 16)), h("span", { class: "label" }, label), h("span", { class: "count" }, count));
   }
+
+  // Fabric's Type filter: a button naming the choice, and a panel of groups that open to their types.
+  function typeFilter(items) {
+    const counts = {};
+    items.forEach((r) => { counts[r.type] = (counts[r.type] || 0) + 1; });
+    const groups = [...TYPE_GROUPS.map(([id, label, ic]) => [id, label, ic]), ["other", "Other types", "document"]]
+      .map(([id, label, ic]) => [id, label, ic, Object.keys(counts).filter((t) => typeGroup(t) === id).sort((a, b) => counts[b] - counts[a])])
+      .filter(([, , , types]) => types.length);
+    const total = (types) => types.reduce((n, t) => n + counts[t], 0);
+    const chosen = cp.type === "all" ? `All (${items.length})`
+      : cp.type.startsWith("g:") ? `${TYPE_GROUP_LABEL[cp.type.slice(2)]} (${total(Object.keys(counts).filter((t) => typeGroup(t) === cp.type.slice(2)))})`
+      : `${typeLabel(cp.type)} (${counts[cp.type] || 0})`;
+    const pick = (type) => { cp.type = type; closeTypePanel(); draw(); };
+    const check = (on) => h("span", { class: "tick", "aria-hidden": "true" }, on ? "✓" : "");
+    const panel = h("div", { class: "type-panel", role: "menu" },
+      h("button", { class: "type-row", role: "menuitemradio", "aria-checked": String(cp.type === "all"), onclick: () => pick("all") },
+        check(cp.type === "all"), h("span", { class: "label" }, "All types"), h("span", { class: "count" }, items.length)),
+      ...groups.map(([id, label, ic, types]) => {
+        const open = cp.typeOpen.has(id) || types.includes(cp.type);
+        return h("div", { class: "type-group" },
+          h("div", { class: "type-row-wrap" },
+            h("button", { class: "type-row", role: "menuitemradio", "aria-checked": String(cp.type === `g:${id}`), onclick: () => pick(`g:${id}`) },
+              check(cp.type === `g:${id}`), icon(ic, 16), h("span", { class: "label" }, label), h("span", { class: "count" }, total(types))),
+            h("button", { class: "type-expand", title: open ? `Hide ${label} types` : `Show ${label} types`, "aria-expanded": String(open),
+              onclick: (e) => { e.stopPropagation(); open ? cp.typeOpen.delete(id) : cp.typeOpen.add(id); drawTypePanel(); } },
+            icon(open ? "chevronDown" : "chevronRight", 14))),
+          open ? h("div", { class: "type-sub" }, types.map((t) => h("button", { class: "type-row", role: "menuitemradio",
+            "aria-checked": String(cp.type === t), onclick: () => pick(t) },
+          check(cp.type === t), itemIcon(t, 16), h("span", { class: "label" }, typeLabel(t)), h("span", { class: "count" }, counts[t])))) : null);
+      }));
+    const wrap = h("div", { class: "type-filter" },
+      h("button", { class: `tool outline type-button${cp.type !== "all" ? " on" : ""}`, "aria-haspopup": "menu",
+        onclick: (e) => { e.stopPropagation(); cp.typePanel = !cp.typePanel; drawTypePanel(); } },
+      icon("database", 16), `Type: ${chosen}`, icon("chevronDown", 14)),
+      cp.typePanel ? panel : null);
+    return wrap;
+  }
+  function closeTypePanel() { cp.typePanel = false; }
+  function drawTypePanel() { draw(); }
 
   function draw() {
     if (!cp.data || !here()) return;
@@ -812,27 +933,38 @@ async function renderOneLake() {
     const wsFilter = h("input", { class: "catalog-search small", placeholder: "Find a workspace", value: cp.wsQuery, "aria-label": "Find a workspace" });
     wsFilter.addEventListener("input", () => { cp.wsQuery = wsFilter.value; drawWorkspaces(); wsFilter.focus(); });
     const wsList = h("div", { class: "catalog-ws" });
-    const drawWorkspaces = () => wsList.replaceChildren(...cp.data.workspaces
-      .filter((w) => w.displayName.toLowerCase().includes(cp.wsQuery.toLowerCase()))
-      .map((w) => scopeButton(`ws:${w.id}`, w.displayName, "▢", items.filter((r) => r.workspace_id === w.id).length)));
+    // Workspaces as Fabric lists them: My workspace first, then the first few, then "More workspaces...".
+    const WS_SHOWN = 6;
+    const drawWorkspaces = () => {
+      const q = cp.wsQuery.toLowerCase();
+      const all = cp.data.workspaces.filter((w) => w.type !== "Personal" && w.displayName.toLowerCase().includes(q));
+      const list = q || cp.wsAll ? all : all.slice(0, WS_SHOWN);
+      wsList.replaceChildren(...[
+        ...list.map((w) => scopeButton(`ws:${w.id}`, w.displayName, "workspace", items.filter((r) => r.workspace_id === w.id).length)),
+        !q && all.length > WS_SHOWN ? h("button", { class: "catalog-more", onclick: () => { cp.wsAll = !cp.wsAll; drawWorkspaces(); } },
+          cp.wsAll ? "Fewer workspaces" : `More workspaces (${all.length - WS_SHOWN})...`) : null].filter(Boolean));
+    };
     drawWorkspaces();
     const keepFocus = document.activeElement === nav.querySelector(".catalog-search");
-    nav.replaceChildren(
-      scopeButton("all", "All items", "▦", items.length),
-      scopeButton("fav", "Favorites", "★", items.filter((r) => favorites().has(key(r))).length),
-      scopeButton("endorsed", "Endorsed", "✓", end?.available ? items.filter((r) => endorsed()[key(r)]).length : "",
+    const mine = personal();
+    nav.replaceChildren(...[
+      scopeButton("all", "All items", "apps", items.length),
+      mine.size ? scopeButton("mine", "My workspace", "person", items.filter((r) => mine.has(r.workspace_id)).length) : null,
+      scopeButton("endorsed", "Endorsed items", "shield", end?.available ? items.filter((r) => endorsed()[key(r)]).length : "",
         !end?.available, !end ? "Checking endorsement..." : end.reason || ""),
-      h("div", { class: "sec" }, "Workspaces"), wsFilter, wsList);
+      scopeButton("fav", "Favorites", "star", items.filter((r) => favorites().has(key(r))).length),
+      h("div", { class: "sec" }, "Workspaces"), wsFilter, wsList].filter(Boolean));
     if (keepFocus) wsFilter.focus();
 
-    const counts = {};
-    items.forEach((r) => { counts[r.type] = (counts[r.type] || 0) + 1; });
-    const types = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
     const rows = shown();
-    const chip = (type, label) => h("button", { class: `chip${cp.type === type ? " on" : ""}`, onclick: () => { cp.type = type; draw(); } }, label);
-    head.replaceChildren(h("span", { class: "muted-text", style: "font-weight:600" }, "Type"), chip("all", "All"),
-      ...types.map((t) => chip(t, `${typeLabel(t)} ${counts[t]}`)), h("span", { class: "spacer" }),
-      h("span", { class: "muted-text" }, `${rows.length} item${rows.length === 1 ? "" : "s"}`));
+    // The Type filter counts what the left panel and search leave, as Fabric's does.
+    const q = cp.query.toLowerCase();
+    const scoped = items.filter((r) => inScope(r)
+      && (!q || `${r.name} ${r.workspace_name} ${typeLabel(r.type)} ${r.description} ${tablesOf(r).join(" ")}`.toLowerCase().includes(q)));
+    head.replaceChildren(...[typeFilter(scoped),
+      cp.type !== "all" ? btn("Clear", "dismiss", () => { cp.type = "all"; draw(); }, "tool link small") : null,
+      h("span", { class: "spacer" }),
+      h("span", { class: "muted-text" }, `${rows.length} item${rows.length === 1 ? "" : "s"}`)].filter(Boolean));
 
     const sortHead = (col, label) => h("th", {}, h("button", { class: `sort${cp.sort === col ? " on" : ""}`,
       onclick: () => { cp.dir = cp.sort === col ? -cp.dir : 1; cp.sort = col; draw(); } },
@@ -1432,7 +1564,7 @@ async function publishNotebook() {
 // ---------- Where a notebook runs: this PC or Fabric ----------
 
 // Each notebook has a "Runs on" choice: This PC, Fabric, or the default, which follows where the
-// environment picked in the top bar runs (Metadata > Environments). Run all goes there. Fabric
+// environment last picked on the Metadata pages runs (Metadata > Environments). Run all goes there. Fabric
 // runs the whole published notebook, so single cells only run on this PC.
 function nbWhere(nb) {
   const choice = nb?.compute || "default";

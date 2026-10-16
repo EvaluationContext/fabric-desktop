@@ -23,7 +23,7 @@ from deltalake.exceptions import TableNotFoundError
 from . import access as access_mod
 from . import costs as costs_mod
 from . import shortcuts as shortcuts_mod
-from .auth import CONNECTION_SCOPES, GRAPH_USER_SCOPES, ONELAKE_SCOPES
+from .auth import CAPACITY_SCOPES, CONNECTION_SCOPES, GRAPH_USER_SCOPES, ONELAKE_SCOPES
 from .fabric_api import FabricClient
 from .meta import impact
 from .meta import restore as restore_mod
@@ -123,9 +123,14 @@ class EstateMixin:
             project = self._project()  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             return {}
-        fabric = self._quiet_fabric()  # type: ignore[attr-defined]
-        if fabric is None:
+        # Only when Capacity.Read.All was already granted: the cost view never asks for consent.
+        try:
+            token = self.auth.silent_token(CAPACITY_SCOPES)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            token = None
+        if not token:
             return {}
+        fabric = FabricClient(lambda: token)
         cache = getattr(self, "_capacity_cache", None)
         if cache is None:
             try:

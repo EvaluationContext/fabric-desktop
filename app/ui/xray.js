@@ -1,7 +1,7 @@
 // Estate X-ray on Home: every lakehouse you can reach, read once, with what needs attention
 // ranked first and a fix on each line. "Adopt" turns a lakehouse's tables into metadata entities.
 
-const xrayPage = { data: null, timer: null, kind: "all", showAll: false };
+const xrayPage = { data: null, timer: null, kind: "all", showAll: false, folded: false };
 
 const XRAY_KINDS = {
   small_files: "Small files", unidentified: "Unidentified", access: "Access", cost: "Cost",
@@ -16,31 +16,59 @@ function bytesText(n) {
   return `${i ? n.toFixed(1) : n} ${units[i]}`;
 }
 
+// Where each kind of finding is explained, with how to fix it by hand (docs/xray-fixes.md).
+const XRAY_DOCS = {
+  small_files: "small-files", unidentified: "unidentified-tables", access: "access", cost: "cost",
+  stale: "not-changing", vacuum: "never-vacuumed", empty: "empty-lakehouses",
+};
+
+function openXrayDoc(kind) {
+  const anchor = XRAY_DOCS[kind];
+  attempt(() => invoke("open_doc", { page: `xray-fixes.md${anchor ? `#${anchor}` : ""}` }), "Could not open the guide");
+}
+
+// Home calls loadXray once everything else on Home has loaded. The card starts folded or not as
+// last left; folded, it still shows the overall numbers.
 function xrayCard() {
-  const box = h("section", { class: "card pad xray" }, h("div", { class: "muted-text" }, "Loading the estate X-ray..."));
-  loadXray(box, false);
-  return box;
+  let folded = false;
+  try { folded = localStorage.getItem("fd.fold.home.xray") === "1"; } catch { /* unfolded */ }
+  xrayPage.folded = folded;
+  return h("section", { class: `card pad xray${folded ? " folded" : ""}` },
+    h("div", { class: "muted-text" }, "The Estate X-ray loads once the rest of Home is in."));
 }
 
 async function loadXray(box, refresh) {
   clearTimeout(xrayPage.timer);
   if (!state.user) { drawXray(box, null); return; }
-  let res = await attempt(() => rpc("xray", { refresh }), refresh ? "Scan not started" : "Could not read the X-ray");
-  if (!res || state.view !== "home") return;
-  // First launch: nothing scanned yet, so scan now.
-  if (!res.result && !res.running && !res.error && !refresh) {
-    res = await attempt(() => rpc("xray", { refresh: true }), "Scan not started");
-    if (!res || state.view !== "home") return;
-  }
+  // auto: the very first scan on this PC starts by itself; after that only the button scans.
+  const res = await attempt(() => rpc("xray", { refresh, auto: !refresh }), refresh ? "Scan not started" : "Could not read the X-ray");
+  if (!res || state.view !== "home" || !box.isConnected) return;
   xrayPage.data = res;
   drawXray(box, res);
-  if (res.running) xrayPage.timer = setTimeout(() => loadXray(box, false), 1500);
+  if (res.running && !res.paused) xrayPage.timer = setTimeout(() => loadXray(box, false), 2000);
+}
+
+async function pauseXray(box, paused) {
+  clearTimeout(xrayPage.timer);
+  const res = await attempt(() => rpc("xray_pause", { paused }), paused ? "Could not pause the scan" : "Could not resume the scan");
+  if (!res || !box.isConnected) return;
+  xrayPage.data = res;
+  drawXray(box, res);
+  if (res.running && !res.paused) xrayPage.timer = setTimeout(() => loadXray(box, false), 2000);
 }
 
 function drawXray(box, res) {
+  const foldBtn = h("button", { class: "tool outline small", "aria-expanded": String(!xrayPage.folded),
+    onclick: () => {
+      xrayPage.folded = !xrayPage.folded;
+      try { localStorage.setItem("fd.fold.home.xray", xrayPage.folded ? "1" : "0"); } catch { /* this session only */ }
+      box.classList.toggle("folded", xrayPage.folded);
+      drawXray(box, res);
+    } }, xrayPage.folded ? "Show details" : "Hide details");
   const head = (extra) => h("div", { class: "xray-head" },
     h("div", { class: "grow" }, h("h2", {}, "Estate X-ray"),
-      h("div", { class: "muted-text small" }, "Every lakehouse you can reach, read once: what slows it down, what is broken, who has access, and what it costs.")),
+      h("div", { class: "muted-text small" }, "Every lakehouse you can reach, read once: what slows it down, what is broken, who has access, and what it costs. ",
+        h("a", { href: "#", onclick: (e) => { e.preventDefault(); openXrayDoc(null); } }, "How each fix works"))),
     extra);
   if (!state.user) {
     fill(box, head(btn("Sign in and scan", "search", async () => { if (await signIn()) render(); }, "tool primary")),
@@ -48,16 +76,19 @@ function drawXray(box, res) {
     return;
   }
   const result = res.result;
-  const scanBtn = res.running ? null : btn(result ? "Scan again" : "Scan now", "sync", () => loadXray(box, true), "tool outline");
+  const scanBtn = res.running
+    ? btn(res.paused ? "Resume" : "Pause", res.paused ? "play" : "pause", () => pauseXray(box, !res.paused), "tool outline")
+    : btn(result ? "Scan again" : "Scan now", "sync", () => loadXray(box, true), "tool outline");
   const progress = res.running ? h("div", { class: "xray-progress" },
-    h("div", { class: "row" }, h("b", {}, res.progress?.phase || "Scanning"),
+    h("div", { class: "row" }, h("b", {}, res.paused ? `Paused: ${(res.progress?.phase || "scanning").toLowerCase()}` : res.progress?.phase || "Scanning"),
       res.progress?.total ? h("span", { class: "muted-text small" }, `${res.progress.done} of ${res.progress.total}`) : null),
     h("div", { class: "progress" }, res.progress?.total
-      ? h("div", { class: "bar", style: `width:${Math.max(4, Math.round(100 * res.progress.done / res.progress.total))}%` })
-      : h("div", { class: "bar indeterminate" }))) : null;
+      ? h("div", { class: `bar${res.paused ? " paused" : ""}`, style: `width:${Math.max(4, Math.round(100 * res.progress.done / res.progress.total))}%` })
+      : h("div", { class: `bar${res.paused ? " paused" : " indeterminate"}` }))) : null;
   if (!result) {
-    fill(box, head(scanBtn), progress,
-      res.error ? h("p", { class: "reason" }, `The scan stopped: ${friendlyError(res.error).text}`) : null);
+    fill(box, head(h("div", { class: "row" }, scanBtn)), progress,
+      res.error ? h("p", { class: "reason" }, `The scan stopped: ${friendlyError(res.error).text}`) : null,
+      !res.running && !res.error ? h("p", { class: "muted-text" }, "No scan yet. It reads table logs and workspace roles only, and changes nothing.") : null);
     return;
   }
   const open = result.findings.filter((f) => !f.fixed);
@@ -70,13 +101,19 @@ function drawXray(box, res) {
   const limit = xrayPage.showAll ? shown.length : 6;
   const high = open.filter((f) => f.severity === "high").length;
 
-  fill(box, 
-    head(h("div", { class: "row" }, h("span", { class: "muted-text small" }, "Scanned ", when(result.scanned)), scanBtn)),
+  const stats = h("div", { class: "xray-stats" },
+    stat(result.workspaces, "workspaces"), stat(result.lakehouses, "lakehouses"),
+    stat(result.tables, result.partial ? "tables (first 500)" : "tables"), stat(bytesText(result.bytes), "in Delta tables"),
+    stat(open.length, open.length === 1 ? "finding" : "findings", open.length ? (high ? "bad" : "warn") : "good"));
+  const top = head(h("div", { class: "row" }, h("span", { class: "muted-text small" }, "Scanned ", when(result.scanned)), scanBtn, foldBtn));
+  if (xrayPage.folded) {
+    fill(box, top, progress, stats);
+    return;
+  }
+  fill(box,
+    top,
     progress,
-    h("div", { class: "xray-stats" },
-      stat(result.workspaces, "workspaces"), stat(result.lakehouses, "lakehouses"),
-      stat(result.tables, result.partial ? "tables (first 500)" : "tables"), stat(bytesText(result.bytes), "in Delta tables"),
-      stat(open.length, open.length === 1 ? "finding" : "findings", open.length ? (high ? "bad" : "warn") : "good")),
+    stats,
     result.skipped?.length ? h("p", { class: "muted-text small" }, `Couldn't read: ${result.skipped.join(", ")} (a paused capacity, or no access).`) : null,
     open.length ? h("div", { class: "row wrap xray-chips" }, chip("all", "All", open.length),
       Object.entries(XRAY_KINDS).filter(([k]) => byKind[k]).map(([k, label]) => chip(k, label, byKind[k]))) : null,
@@ -118,7 +155,8 @@ function xrayFinding(f, box, res) {
     h("span", { class: `pill-s ${sev[0]}` }, sev[1]),
     h("div", { class: "grow" },
       h("div", {}, h("b", {}, f.title)),
-      h("div", { class: "muted-text small" }, f.detail),
+      h("div", { class: "muted-text small" }, f.detail, " ",
+        h("a", { href: "#", onclick: (e) => { e.preventDefault(); openXrayDoc(f.kind); } }, "How to fix this")),
       xrayWhere(f) ? h("div", { class: "muted-text small where" }, xrayWhere(f)) : null),
     action ? action() : null);
 }

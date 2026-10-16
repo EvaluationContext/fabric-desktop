@@ -142,3 +142,40 @@ def test_adopt_writes_entities_and_skips_what_exists(tmp_path, monkeypatch):
     assert p["errors"] == [] and "bronze.raw_orders" in {e["name"] for e in p["entities"]}
     again = {t["table"]: t for t in svc.xray_adopt_plan("ws-sales", "lh-raw", "LH_Raw", "Sales")["tables"]}
     assert again["orders"]["why"] == "Already adopted as bronze.raw_orders"
+
+
+def test_scan_waits_while_paused(tmp_path):
+    import threading
+    _lake(tmp_path)
+    gate = threading.Event()  # starts paused
+    out = {}
+    worker = threading.Thread(target=lambda: out.update(xray.Scanner(FakeFabric(), _files(tmp_path), _health(tmp_path),
+                                                                     gate=gate).scan()))
+    worker.start()
+    worker.join(0.5)
+    assert worker.is_alive() and not out  # paused before the first workspace
+    gate.set()
+    worker.join(30)
+    assert out["tables"] == 5
+
+
+def test_home_scans_by_itself_only_once(tmp_path, monkeypatch):
+    svc = Service(root=tmp_path / "app")
+    started = []
+    monkeypatch.setattr(svc, "_xray_run", lambda *a: started.append(a))
+
+    class Auth:
+        def fabric_token(self):
+            return "f"
+
+        def storage_token(self):
+            return "s"
+    monkeypatch.setattr(Service, "auth", property(lambda self: Auth()), raising=False)
+    assert svc.xray(auto=True)["running"] is True
+    svc._xray_state = {"running": False, "error": "RuntimeError: offline"}  # the scan failed: nothing saved
+    assert svc.xray(auto=True)["running"] is False  # a second Home visit doesn't scan again
+    assert len(started) == 1
+    assert svc.xray(refresh=True)["running"] is True  # the button does
+    assert svc.xray_pause(True)["paused"] is True
+    assert not svc._xray_gate.is_set()
+    assert svc.xray_pause(False)["paused"] is False and svc._xray_gate.is_set()

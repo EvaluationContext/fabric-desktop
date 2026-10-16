@@ -198,12 +198,16 @@ async fn rpc(
         *state.child.lock().map_err(|e| e.to_string())? = Some(sidecar.child.clone());
         *guard = Some(sidecar);
     }
-    let result = guard
-        .as_mut()
-        .expect("sidecar started")
-        .call(&method, params.unwrap_or_else(|| json!({})));
+    let sidecar = guard.as_mut().expect("sidecar started");
+    let first_call = sidecar.next_id == 1;
+    let result = sidecar.call(&method, params.unwrap_or_else(|| json!({})));
     if matches!(&result, Err(e) if e.starts_with(SIDECAR_EXITED)) {
         *guard = None;
+        if first_call {
+            // It would not even start: have the next startup check load the engine again
+            // rather than trusting that this build worked before.
+            let _ = std::fs::remove_file(data_dir().join("engine-verified.json"));
+        }
     }
     result
 }
@@ -430,6 +434,7 @@ async fn fabric_view_show(
     height: f64,
     tenant: Option<String>,
     page: Option<String>,
+    force: Option<bool>,
 ) -> Result<(), String> {
     let page = page.unwrap_or_else(|| "monitor".into());
     let target = fabric_page(&page, tenant.as_deref())?;
@@ -438,8 +443,10 @@ async fn fabric_view_show(
     if let Some(view) = app.get_webview(FABRIC_VIEW) {
         view.set_position(position).map_err(|e| e.to_string())?;
         view.set_size(size).map_err(|e| e.to_string())?;
+        // force: someone clicked a link, so go there even if it is the page last sent; they may
+        // have moved around inside Fabric since.
         let changed = { let mut shown = FABRIC_SHOWN.lock().unwrap(); std::mem::replace(&mut *shown, page.clone()) != page };
-        if changed {
+        if changed || force.unwrap_or(false) {
             view.navigate(target).map_err(|e| e.to_string())?;
         }
         return view.show().map_err(|e| e.to_string());
@@ -737,6 +744,20 @@ async fn fabric_view_action(app: tauri::AppHandle, action: String, page: Option<
     }
 }
 
+/// Opens one of this repository's docs pages in the default browser, such as
+/// "xray-fixes.md#small-files". Only pages under docs/ on GitHub.
+#[tauri::command]
+fn open_doc(page: String) -> Result<(), String> {
+    let ok = !page.is_empty()
+        && !page.contains("..")
+        && page.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.#/".contains(&b));
+    if !ok {
+        return Err(format!("Not a docs page: {page}"));
+    }
+    let url = Url::parse(&format!("https://github.com/KratosDataGod/fabric-desktop/blob/main/docs/{page}")).map_err(|e| e.to_string())?;
+    open_in_browser(&url)
+}
+
 fn main() {
     // Left behind by the last update; the old process has exited by now.
     if let Ok(exe) = std::env::current_exe() {
@@ -747,7 +768,7 @@ fn main() {
         .manage(SidecarState { sidecar: Mutex::new(None), child: Mutex::new(None) })
         .invoke_handler(tauri::generate_handler![
             rpc, stop_kernel, check_components, update_sidecar, update_app,
-            fabric_view_show, fabric_view_hide, fabric_view_action
+            fabric_view_show, fabric_view_hide, fabric_view_action, open_doc
         ])
         .run(tauri::generate_context!())
         .expect("error while running Fabric Desktop");

@@ -6,6 +6,8 @@ Do your Microsoft Fabric data engineering on your own Windows PC: notebooks, Spa
 
 **Develop with Fabric Desktop. Execute on your infrastructure. Store and consume in Microsoft Fabric.** The picture above is where the product is headed. Today the desktop app and a single-node [headless agent](docs/agent.md) are built; multiple workers, resource governance and pipeline hand-off are later milestones in the [enterprise roadmap](docs/enterprise-roadmap.md).
 
+**Why it exists:** Power BI took off because developers could build on their own machine and deploy to the cloud. Fabric Desktop brings that model to data engineering. Read the story in **[Bringing the Power BI Model to Data Engineering](docs/why-fabric-desktop.md)**.
+
 ![Fabric Desktop architecture](docs/architecture.svg)
 
 - **Local compute:** notebooks run in a Python kernel on the PC, SQL runs in DuckDB, and Python transforms run in Polars.
@@ -21,8 +23,10 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 
 | Document | What it covers |
 | --- | --- |
+| [docs/why-fabric-desktop.md](docs/why-fabric-desktop.md) | Why Fabric Desktop is needed: bringing Power BI's build-locally, deploy-to-the-cloud model to data engineering |
 | [docs/architecture.md](docs/architecture.md) | How the app, the sidecar and OneLake fit together |
 | [docs/permissions.md](docs/permissions.md) | Every Entra permission the app uses, in alphabetical order; setup steps; fixing admin consent errors; what the agent needs instead |
+| [docs/xray-fixes.md](docs/xray-fixes.md) | Each Estate X-ray finding: what it means, what the app's fix button does, and how to fix it by hand in Fabric |
 | [docs/agent.md](docs/agent.md) | The headless agent: identity setup, `agent.toml`, installing on Linux (systemd or container) and Windows, operating it, and what to verify on your tenant |
 | [docs/enterprise-roadmap.md](docs/enterprise-roadmap.md) | The enterprise local execution assessment: feature inventory, gap analysis, architecture changes, roadmap milestones M0 to M6 and work items |
 | [deploy/agent.example.toml](deploy/agent.example.toml) | Every agent setting, with comments |
