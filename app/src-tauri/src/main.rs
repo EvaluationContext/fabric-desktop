@@ -47,9 +47,13 @@ fn release_tag() -> &'static str {
 
 /// Where release builds get their engine: Python with the sidecar and every package it
 /// needs, built and (once a certificate is set up) code-signed by CI, so the PC's own
-/// Python and its unsigned packages are not involved.
-fn engine_url() -> String {
-    format!("https://github.com/KratosDataGod/fabric-desktop/releases/download/{}/fabric-desktop-engine.zip", release_tag())
+/// Python and its unsigned packages are not involved. Stable falls back to Preview
+/// ("latest") while no build has been promoted, as the updater does.
+fn engine_urls() -> Vec<String> {
+    let tags: &[&str] = if release_tag() == "stable" { &["stable", "latest"] } else { &["latest"] };
+    tags.iter()
+        .map(|tag| format!("https://github.com/KratosDataGod/fabric-desktop/releases/download/{tag}/fabric-desktop-engine.zip"))
+        .collect()
 }
 
 /// Release builds run the bundled engine; local builds, and anyone who sets
@@ -326,11 +330,18 @@ fn install_engine(app: &tauri::AppHandle) -> Result<String, String> {
     let nocache = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
     say("Downloading the engine (Python and its packages, about 150 MB)…");
-    let mut curl = Command::new("curl.exe");
-    curl.args(["-L", "--fail", "-sS", "-H", "Cache-Control: no-cache", "-o"])
-        .arg(&zip)
-        .arg(format!("{}?nocache={nocache}", engine_url()));
-    run_tool(curl, "download the engine")?;
+    let mut result = Err(String::new());
+    for url in engine_urls() {
+        let mut curl = Command::new("curl.exe");
+        curl.args(["-L", "--fail", "-sS", "-H", "Cache-Control: no-cache", "-o"])
+            .arg(&zip)
+            .arg(format!("{url}?nocache={nocache}"));
+        result = run_tool(curl, "download the engine");
+        if result.is_ok() {
+            break;
+        }
+    }
+    result?;
 
     say("Unpacking the engine…");
     let _ = std::fs::remove_dir_all(&staging);

@@ -210,25 +210,39 @@ def _get(url: str, timeout: int = 5):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def release_channels() -> list:
+    """Releases to try, in order. Stable falls back to Preview while no build has been promoted
+    yet, so a new install never ends on a missing release."""
+    name = channel()
+    return [name, "preview"] if name == "stable" else [name]
+
+
+NO_STABLE = "There is no stable release yet, so this PC follows Preview until there is one."
+
+
 def latest_release() -> dict:
     """Commit and notes of the newest exe on this PC's channel, from the release's version.json.
 
     A release download, unlike GitHub's API, has no hourly limit per network address, which
     matters when a whole office shares one.
     """
-    name = channel()
-    try:
-        with _get(f"{release_url(name)}/version.json?nocache={int(time.time())}") as resp:
-            info = json.load(resp)
-    except urllib.error.HTTPError as exc:
-        error = "There is no stable release yet." if exc.code == 404 and name == "stable" else f"HTTPError: {exc}"
-        return {"commit": None, "error": error, "channel": name, "notes": ""}
-    except Exception as exc:  # offline
-        return {"commit": None, "error": f"{type(exc).__name__}: {exc}", "channel": name, "notes": ""}
-    commit = info.get("commit") or ""
-    if not SHA.fullmatch(commit):
-        return {"commit": None, "error": f"the release names {commit!r}, not a commit", "channel": name, "notes": ""}
-    return {"commit": commit, "error": None, "channel": name, "notes": str(info.get("notes") or "")}
+    name, note = channel(), ""
+    for tag in release_channels():
+        try:
+            with _get(f"{release_url(tag)}/version.json?nocache={int(time.time())}") as resp:
+                info = json.load(resp)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and tag == "stable":
+                note = NO_STABLE
+                continue
+            return {"commit": None, "error": f"HTTPError: {exc}", "channel": name, "notes": "", "note": note}
+        except Exception as exc:  # offline
+            return {"commit": None, "error": f"{type(exc).__name__}: {exc}", "channel": name, "notes": "", "note": note}
+        commit = info.get("commit") or ""
+        if not SHA.fullmatch(commit):
+            return {"commit": None, "error": f"the release names {commit!r}, not a commit", "channel": name, "notes": "", "note": note}
+        return {"commit": commit, "error": None, "channel": name, "notes": str(info.get("notes") or ""), "note": note}
+    return {"commit": None, "error": "No release was found.", "channel": name, "notes": "", "note": note}
 
 
 def check() -> dict:
@@ -280,9 +294,18 @@ def install_sidecar(commit: str) -> int:
 def download_app(dest: str, commit: str = "") -> int:
     """Download the latest exe. With a commit, check the file is that build, since each
     exe carries its commit; a stale cached copy is fetched once more, then refused."""
+    tags = release_channels()
     for attempt in range(2):
-        url = f"{release_url()}/fabric-desktop.exe" + (f"?nocache={int(time.time())}" if attempt else "")
-        with _get(url, timeout=30) as resp, open(dest, "wb") as out:
+        url = f"{release_url(tags[0])}/fabric-desktop.exe" + (f"?nocache={int(time.time())}" if attempt else "")
+        try:
+            resp = _get(url, timeout=30)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and len(tags) > 1:  # no stable release yet: Preview
+                tags.pop(0)
+                resp = _get(f"{release_url(tags[0])}/fabric-desktop.exe?nocache={int(time.time())}", timeout=30)
+            else:
+                raise
+        with resp, open(dest, "wb") as out:
             total = int(resp.headers.get("Content-Length") or 0)
             done, last = 0, -1
             while chunk := resp.read(1 << 16):

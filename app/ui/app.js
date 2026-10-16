@@ -2078,6 +2078,7 @@ async function checkComponents(afterInstall = false) {
   const { app, sidecar, latest } = report;
   state.commit = app.commit;
   state.release = latest;
+  if (latest.note) logActivity({ status: "info", title: "Updates", text: latest.note });
 
   if (report.bundled) {
     set("python", report.python ? "ok" : "skip", report.python ? `${report.python}, part of the engine` : "Comes with the engine");
