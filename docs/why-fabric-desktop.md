@@ -18,7 +18,7 @@ Fabric Desktop isn't replacing Microsoft Fabric. It's extending it, giving devel
 
 ## Read next
 
-- [README](../README.md): what Fabric Desktop does today and how to set it up.
+- [README](https://github.com/KratosDataGod/fabric-desktop/blob/main/README.md): what Fabric Desktop does today and how to set it up.
 - [Architecture](architecture.md): how the app, the local engine and OneLake fit together.
 - [Headless agent](agent.md): running the same workloads unattended on your own servers.
 - [Enterprise roadmap](enterprise-roadmap.md): where local execution goes next.

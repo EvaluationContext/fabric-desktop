@@ -47,7 +47,7 @@ This isn't a broken install, so reinstalling won't help. The engine's Python pac
 | **Smart App Control** (Windows 11 on a home or personal PC) | It can't allow just one app. Either use a PC without it, or turn it off in **Windows Security > App & browser control > Smart App Control settings** and click **Retry**. Some Windows versions can't turn it back on without a reset, so decide that first. |
 | **An App Control policy** (set by your organization) | Ask IT to allow the Python packages in the folder the window names. They see each block in **Event Viewer > Microsoft > Windows > CodeIntegrity > Operational**. Then click **Retry**. |
 
-The lasting fix is code signing: CI signs every file when the repository has an Azure Trusted Signing account set up ([README: Code signing](../README.md#code-signing)). That isn't in place yet.
+The lasting fix is code signing: CI signs every file when the repository has an Azure Trusted Signing account set up ([README: Code signing](https://github.com/KratosDataGod/fabric-desktop/blob/main/README.md#code-signing)). That isn't in place yet.
 
 ## Updates
 
@@ -87,7 +87,7 @@ Nothing in Fabric is removed. Lakehouses, tables and notebooks you published sta
 
 ## For developers: run from source
 
-To work on Fabric Desktop itself, see [CONTRIBUTING.md](../CONTRIBUTING.md). In short:
+To work on Fabric Desktop itself, see [CONTRIBUTING.md](https://github.com/KratosDataGod/fabric-desktop/blob/main/CONTRIBUTING.md). In short:
 
 ```powershell
 cd sidecar

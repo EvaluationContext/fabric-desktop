@@ -34,7 +34,7 @@ Fabric Desktop runs Microsoft Fabric data engineering work on your own PC (noteb
 | [ui-guidelines.md](ui-guidelines.md) | Contributors | Where new features go in the UI |
 | [enterprise-roadmap.md](enterprise-roadmap.md) | Platform owners | Milestones for running at enterprise scale |
 | [why-fabric-desktop.md](why-fabric-desktop.md) | Everyone | Why it exists: the Power BI model for data engineering |
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contributors | Setting up, rules for changes, pull requests |
+| [CONTRIBUTING.md](https://github.com/KratosDataGod/fabric-desktop/blob/main/CONTRIBUTING.md) | Contributors | Setting up, rules for changes, pull requests |
 
 ## What is tested and what isn't
 

@@ -9,7 +9,7 @@ This page explains how to submit a good idea, how voting works, and how ideas ar
 | Suggest a feature or a change | [Ideas forum](https://github.com/KratosDataGod/fabric-desktop/discussions/categories/ideas) (this page) |
 | Report something that's broken | **Report a problem** in the app (account menu), or a [bug report](https://github.com/KratosDataGod/fabric-desktop/issues/new/choose) |
 | Ask how to do something | [Q&A](https://github.com/KratosDataGod/fabric-desktop/discussions/categories/q-a) |
-| Contribute code or docs | [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| Contribute code or docs | [CONTRIBUTING.md](https://github.com/KratosDataGod/fabric-desktop/blob/main/CONTRIBUTING.md) |
 
 ## Before you post
 

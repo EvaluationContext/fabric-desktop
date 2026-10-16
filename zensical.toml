@@ -1,0 +1,128 @@
+# Zensical builds the documentation site from docs/. Preview it on your PC with:
+#   pip install zensical
+#   zensical serve
+# Merges to main publish it to GitHub Pages (.github/workflows/docs.yml).
+
+[project]
+site_name = "Fabric Desktop"
+site_url = "https://kratosdatagod.github.io/fabric-desktop/"
+site_description = "Do your Microsoft Fabric data engineering on your own PC and write the results straight into OneLake."
+site_author = "KratosBI"
+copyright = "Copyright &copy; KratosBI"
+
+repo_url = "https://github.com/KratosDataGod/fabric-desktop"
+repo_name = "KratosDataGod/fabric-desktop"
+edit_uri = "edit/main/docs/"
+
+docs_dir = "docs"
+site_dir = "site"
+strict = true
+
+nav = [
+  { "Home" = "README.md" },
+  { "Get started" = [
+    { "Install" = "install.md" },
+    { "Configure Azure and Fabric" = "azure-setup.md" },
+    { "Permissions" = "permissions.md" },
+  ] },
+  { "Use the app" = [
+    { "User guide" = "user-guide.md" },
+    { "Notebooks and SQL" = "notebooks.md" },
+    { "Metadata framework" = "metadata-guide.md" },
+    { "Working across teams" = "teams.md" },
+    { "Troubleshooting" = "troubleshooting.md" },
+    { "Estate X-ray fixes" = "xray-fixes.md" },
+  ] },
+  { "Servers" = [
+    { "Headless agent" = "agent.md" },
+  ] },
+  { "Project" = [
+    { "Why Fabric Desktop" = "why-fabric-desktop.md" },
+    { "Submitting ideas" = "ideas.md" },
+    { "Enterprise roadmap" = "enterprise-roadmap.md" },
+  ] },
+  { "Contributing" = [
+    { "Architecture" = "architecture.md" },
+    { "UI guidelines" = "ui-guidelines.md" },
+  ] },
+]
+
+extra_css = ["stylesheets/extra.css"]
+
+[project.theme]
+language = "en"
+logo = "brand/kratosbi-mark.svg"
+favicon = "brand/kratosbi-mark.svg"
+features = [
+  "content.action.edit",
+  "content.action.view",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.tabs.sticky",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "search.suggest",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/KratosDataGod/fabric-desktop"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tasklist.custom_checkbox = true

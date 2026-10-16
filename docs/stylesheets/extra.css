@@ -1,0 +1,17 @@
+/* KratosBI colours for the documentation site (zensical.toml sets primary and accent to "custom"). */
+:root {
+  --md-primary-fg-color: #1b3664;
+  --md-primary-fg-color--light: #2f4f8a;
+  --md-primary-fg-color--dark: #122343;
+  --md-accent-fg-color: #2f6fd6;
+}
+
+/* The brand mark is navy on white, so give it a white tile on the header. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  background: #ffffff;
+  border-radius: 4px;
+  padding: 2px;
+  height: 1.6rem;
+  width: auto;
+}

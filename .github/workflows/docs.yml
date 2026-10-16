@@ -1,0 +1,47 @@
+# Builds the documentation site from docs/ with Zensical (zensical.toml) and publishes it to
+# GitHub Pages. Pull requests get a build check only; merges to main publish.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "zensical.toml", ".github/workflows/docs.yml"]
+  pull_request:
+    paths: ["docs/**", "zensical.toml", ".github/workflows/docs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install zensical
+      # strict = true in zensical.toml: a broken link or anchor fails the build.
+      - run: zensical build --clean
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment

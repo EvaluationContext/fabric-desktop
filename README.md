@@ -21,7 +21,7 @@ How the pieces fit together, how a request flows and how writes reach OneLake: s
 
 ## Documentation
 
-**Start at the [documentation home](docs/README.md).** It says which guide to read for what you're doing, and what is tested and what isn't.
+**Read the docs at [kratosdatagod.github.io/fabric-desktop](https://kratosdatagod.github.io/fabric-desktop/)**, or start at the [documentation home](docs/README.md) in this repository. It says which guide to read for what you're doing, and what is tested and what isn't. The site is built from `docs/` by [Zensical](https://zensical.org) (`zensical.toml`) and published on every merge to main.
 
 | Document | What it covers |
 | --- | --- |

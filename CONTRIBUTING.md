@@ -8,7 +8,7 @@ Thanks for helping. There are several ways in, and most don't need code.
 | Report a bug | **Report a problem** in the app, then paste it into a [bug report](https://github.com/KratosDataGod/fabric-desktop/issues/new/choose). Check [troubleshooting](docs/troubleshooting.md) first. |
 | Ask a question | [Q&A](https://github.com/KratosDataGod/fabric-desktop/discussions/categories/q-a) |
 | Try new builds | Switch to the **Preview** channel in **Settings > Updates**, and tick "Would you try an early version?" on ideas you care about. |
-| Fix the docs | Edit the file under `docs/` and open a pull request. Small fixes are always welcome. |
+| Fix the docs | Edit the file under `docs/` and open a pull request. Small fixes are always welcome. To preview the site, `pip install zensical` then `zensical serve` in the repository root and open http://localhost:8000. Links are checked on every pull request. |
 | Change the code | Read on. For anything bigger than a small fix, start from an idea or issue so the approach is agreed first. |
 
 ## Set up
